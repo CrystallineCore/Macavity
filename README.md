@@ -48,14 +48,19 @@ sitting and extended without redesign.
 
 ## Installation
 
-Requires PostgreSQL 14 or later (server development headers: the
+Requires PostgreSQL 16 or later (server development headers: the
 `postgresql-server-dev-*` package on Debian/Ubuntu, `postgresql*-devel` on
-RHEL).
+RHEL). Older majors are rejected at compile time rather than failing
+obscurely partway through the build.
 
 ```sh
 make
 make install          # may need sudo
 ```
+
+The distribution carries a PGXN `META.json` (release status `testing`), so
+it can also be built and installed with `pgxn install macavity` once
+published.
 
 Then, in a database on a **test** cluster:
 
@@ -337,18 +342,20 @@ and one `macavity_fire()` call from the relevant hook.
 
 ## PostgreSQL compatibility
 
-Tested against PostgreSQL 16; the code targets 14 and later, and the
-version-dependent pieces are isolated:
+macavity targets **PostgreSQL 16 and later**, and is tested against
+PostgreSQL 16. `src/macavity.h` refuses to compile on anything older, so an
+unsupported major fails immediately with a clear message instead of an
+obscure hook-signature error.
 
-- `ExecutorRun_hook` lost its `execute_once` argument in PostgreSQL 18; the
-  hook is compiled both ways behind `PG_VERSION_NUM` in `src/macavity.c`
-  (`ExecutorStart_hook` itself still returns `void` in 18 and on master)
-- the set-returning-function helper was renamed from `SetSingleFuncCall()`
-  to `InitMaterializedSRF()` in PostgreSQL 15; both are handled in
-  `src/macavity_api.c`
+Only one API in use differs across supported majors, and it is isolated:
 
-Everything else uses APIs that have been stable across all supported
-branches.
+- `ExecutorRun_hook` lost its `execute_once` argument in PostgreSQL 18, so
+  the hook is compiled both ways behind `PG_VERSION_NUM` in
+  `src/macavity.c`. (`ExecutorStart_hook` itself still returns `void` in 18
+  and on master, so nothing is needed for it.)
+
+Everything else — the other executor hooks, `RegisterXactCallback()`,
+`InitMaterializedSRF()` — has been stable since 16.
 
 ## Future possibilities
 
@@ -369,4 +376,6 @@ shape:
 
 ## License
 
-PostgreSQL License.
+MIT. See [LICENSE](LICENSE).
+
+Copyright © 2026 Sivaprasad Murali.
