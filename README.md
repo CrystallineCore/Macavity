@@ -28,22 +28,17 @@ which is roughly how a fault behaves here: it does its damage and is no
 longer armed by the time you look. The evidence, though, is still on the
 record, which is the one place the analogy breaks down deliberately.
 
-In short:
-
-- fault state is **session-local**, and **at most one fault can be armed per
-  session**
+- fault state is **session-local**, and **at most one fault can be armed
+  per session**
 - `macavity_arm()` and `macavity_disarm()` both return an empty 1×1 result
 - `macavity_status()` exposes the current state: `armed`, `point`, `action`,
   `occurrence`, `hits`, `remaining`
 - `hits` counts matching fault-point hits; `remaining` (`occurrence - hits`)
-  falls by one on every matching hit
-- the counters are updated before the fault action is injected, so the
-  hit that fires the fault is always recorded. However, the remaining count
-  depends on whether the configured fault point occurs at the start or end
-    of a specific operation.
-- `crash` terminates the current backend; that connection cannot restore
-  itself, and PostgreSQL may terminate other backends afterwards as crash
-  containment — which is not macavity state crossing sessions
+  falls by one on every matching hit, and both are updated **before** the
+  fault action runs, so the hit that fires the fault is always recorded
+- `crash` terminates the current backend; PostgreSQL then disconnects other
+  backends as crash containment — that is the server's behaviour, not
+  macavity state crossing sessions (see [About `crash`](#about-crash))
 - a newly established session starts with no armed fault
 
 ## Why it exists
@@ -125,10 +120,6 @@ SELECT * FROM macavity_status();
  f     |       |        |            |      |
 ```
 
-`macavity_arm()` and `macavity_disarm()` both return `void`, which psql
-renders as an empty 1×1 result — a single unnamed, empty cell. That is the
-call succeeding, not an error.
-
 Delay the fifth matching event instead of failing it:
 
 ```sql
@@ -176,46 +167,25 @@ SELECT macavity_disarm();
 | **fired** — the fault has gone off | `f` | the fault that fired, with its final counters (`remaining` is 0) |
 | **clear** — nothing armed, nothing fired since the last disarm | `f` | all NULL |
 
+A **fired** fault is distinguished from a **clear** one by `point` being
+non-NULL. It is kept deliberately, so you can confirm after an injected
+error that the hit was recorded; `macavity_arm()` overwrites it and
+`macavity_disarm()` clears it.
+
 Column by column:
 
 - **`hits`** counts *matching fault-point hits*: events at the armed point,
-  in this session, since the fault was armed. Events at other points, and
-  events in other sessions, do not count.
-- **`remaining`** is `occurrence - hits`. It falls by one on every matching
-  hit and reaches 0 on the hit that fires the fault.
-- Both are updated **before** the configured action runs (see below), so the
-  hit that fires the fault is always included.
-- The counters are **not transactional**. An injected `error` aborts its
+  in this session, since the fault was armed. Events at other points, and in
+  other sessions, do not count.
+- **`remaining`** is `occurrence - hits`, falling by one on every matching
+  hit and reaching 0 on the hit that fires the fault.
+- Both are updated **before** the configured action runs, so the hit that
+  fires the fault is always included.
+- The counters are **not transactional**: an injected `error` aborts its
   transaction, but the recorded hit is not rolled back with it — which is
   precisely what makes the fired-state counters worth reading.
 
-A **fired** fault is distinguished from a **clear** one by `point` being
-non-NULL. The fired state is kept deliberately: it is how you confirm, after
-an injected error, that the hit was recorded. `macavity_arm()` overwrites it
-and `macavity_disarm()` clears it.
-
-### Counters are updated before the action runs
-
-When a matching event reaches the armed fault point, macavity does this, in
-this order:
-
-```
-fault point reached
-    ↓
-hits = hits + 1          (so remaining = occurrence - hits falls by one)
-    ↓
-is hits == occurrence?
-    ↓ yes
-mark the fault spent (armed = false, counters kept)
-    ↓
-run the configured action   ← error / crash / delay happen only here
-```
-
-The invariant is: **a fault-point hit is recorded before the injected action
-executes.** Nothing an action does can undo it. An injected `error` unwinds
-past the counting code and a `crash` kills the backend outright, but in both
-cases the increment has already happened. So for
-`macavity_arm('executor_end', 'error', 3)`:
+For `macavity_arm('executor_end', 'error', 3)`, the sequence is:
 
 | Matching hit | `hits` | `remaining` | Action |
 | --- | --- | --- | --- |
@@ -224,8 +194,8 @@ cases the increment has already happened. So for
 | 2 | 2 | 1 | none |
 | 3 | 3 | 0 | `ERROR` raised, *after* the counters reached 3 / 0 |
 
-With a `crash` action the same ordering applies — the hit is counted before
-the `SIGKILL` — but nothing can read the result back afterwards, because the
+The same ordering applies to `crash` — the hit is counted before the
+`SIGKILL` — but nothing can read the result back afterwards, because the
 counters lived in the backend that has just died.
 
 ## Supported actions
@@ -234,59 +204,31 @@ counters lived in the backend that has just died.
 | --- | --- |
 | `error` | Raises `ERROR` (`SQLSTATE P0001`) at the fault point. Normal PostgreSQL semantics follow: the statement fails and the transaction is aborted. |
 | `crash` | **Destructive.** Sends `SIGKILL` to the current backend's own PID. The backend dies immediately and uncleanly. See the warning below. |
-| `delay` | Sleeps for a fixed 1 second. The duration is not part of the v0.1 API; because `occurrence` is the third argument, a future version can add `duration` as a fourth without breaking existing calls. |
-
-Outside of abort processing, `delay` sleeps on the process latch, so
-`statement_timeout` and query cancellation still work during the delay.
+| `delay` | Sleeps for a fixed 1 second. The duration is not part of the v0.1 API; because `occurrence` is the third argument, a future version can add `duration` as a fourth without breaking existing calls. Outside of abort processing, `delay` sleeps on the process latch, so `statement_timeout` and query cancellation still work during it. |
 
 ### About `crash`
 
-`crash` terminates the current backend: the one that armed the fault and
-reached the fault point. The signal goes to `MyProcPid` and nowhere else —
-macavity never signals the postmaster, and never signals another backend.
+`crash` sends `SIGKILL` to `MyProcPid` — the backend that armed the fault
+and reached the fault point — and nowhere else; macavity never signals the
+postmaster or another backend directly.
 
-**The crashed connection cannot restore itself.** The backend is gone, and
-with it everything that lived in its memory, including macavity's fault
-state. The client sees the connection drop and must reconnect. macavity does
-not attempt to recover the connection, and will not. Any statement the
-client had in flight is lost; anything committed before the crash is not
-(crash recovery replays it from WAL).
+**The crashed connection cannot restore itself.** Everything that lived in
+its memory, including macavity's fault state, is gone. The client must
+reconnect, and the new session starts with nothing armed — fault state is
+backend-local, so there is nothing to inherit. Any statement in flight is
+lost; anything already committed survives (crash recovery replays it from
+WAL).
 
-**A reconnected session starts with nothing armed.** Fault state is a
-backend-local variable, so a new backend has nothing to inherit —
-`macavity_status()` on the new connection reports the clear state.
-
-#### What PostgreSQL does next, and what it is not
-
-A backend that exits uncleanly always causes the postmaster to terminate the
-remaining backends and run crash recovery. Other clients on that cluster
-therefore see messages such as:
-
-```
-FATAL:  terminating connection because of crash of another server process
-DETAIL: The postmaster has commanded this server process to roll back the
-        current transaction and exit ...
-```
-
-This is **PostgreSQL's crash containment** — the server protecting shared
-memory after an unclean exit — and it is PostgreSQL's design, not something
-an extension can opt out of. Simulating a crash without it would not be
-simulating a crash.
-
-It is **not** macavity fault state leaking between sessions, and should not
-be described that way. Those other sessions never had a fault armed; nothing
-of macavity's reached them. They were disconnected by the postmaster along
-with every other backend on the cluster, exactly as they would be if the
-backend had been killed by any other means. Fault configuration remains
-strictly session-local at all times, before and after a crash.
-
-So:
-
-- the *mechanism* touches only the backend that armed the fault
-- the *consequence* is a cluster-wide restart and recovery, performed by
-  PostgreSQL
-
-That is exactly why this is test-cluster-only tooling.
+**What happens to other sessions is PostgreSQL's doing, not macavity's.** A
+backend that exits uncleanly always causes the postmaster to terminate the
+remaining backends and run crash recovery — this is PostgreSQL's crash
+containment, protecting shared memory after an unclean exit, and not
+something an extension can opt out of. Those other sessions never had a
+fault armed; they are disconnected exactly as they would be for any other
+unclean backend exit. Fault configuration stays strictly session-local
+throughout — the *mechanism* touches only the backend that armed the fault,
+but the *consequence* is a cluster-wide restart performed by PostgreSQL
+itself. That is exactly why this is test-cluster-only tooling.
 
 ## Supported fault points
 
@@ -297,88 +239,61 @@ That is exactly why this is test-cluster-only tooling.
 | `before_commit` | `RegisterXactCallback`, `XACT_EVENT_PRE_COMMIT` | Before the commit record is written, while an error can still safely abort the transaction. |
 | `before_abort` | `RegisterXactCallback`, `XACT_EVENT_ABORT` | While the transaction is aborting. |
 
-All four are ordinary, documented extension APIs. macavity patches nothing
-in PostgreSQL core and reads no undocumented backend internals.
+All four are available through PostgreSQL's supported extension hook/callback 
+APIs; macavity patches nothing in PostgreSQL core and does not depend on 
+undocumented backend internals.
 
-### Per-point limitations
+### Per-point notes
 
-**`executor_start`** — fires once per executor invocation, which includes
-statements inside functions, `DO` blocks and SPI, not just top-level
-statements. Injecting the fault *before* `standard_ExecutorStart()` would
-leave a half-initialized `QueryDesc` behind for no extra test value, so the
-fault is injected immediately after initialization instead.
-
-**`executor_end`** — fires after the executor has been torn down, so an
-`error` here fails the statement *after* its rows have already been sent to
-the client. The client sees the error and the transaction still aborts, but
-the result set was on the wire before the failure. Also note that the
-statement calling `macavity_arm()` reaches its own `ExecutorEnd` after
-arming; that one event is skipped, so `occurrence = 1` means "the next
-statement", not "this one".
-
-**`before_commit`** — `XACT_EVENT_PRE_COMMIT` is not reached by two-phase
-commit (`PREPARE TRANSACTION` raises `XACT_EVENT_PRE_PREPARE` instead) and
-is not reached by subtransaction release, so faults do not fire for `PREPARE
-TRANSACTION` or for `RELEASE SAVEPOINT`. In autocommit mode the commit of
-the arming statement itself is not counted — otherwise the fault would fire
-before you could run anything. Inside an explicit `BEGIN ... COMMIT` block
-your own `COMMIT` *is* counted, which is what makes the retry example above
-work.
-
-**`before_abort`** — **PostgreSQL has no pre-abort hook.** `XACT_EVENT_ABORT`
-is called from `AbortTransaction()`, when the abort is already under way.
-The consequences are worth stating plainly:
-
-- `error` is **rejected at arm time** for this point. Raising an error
-  during abort processing escalates to `FATAL` and disconnects the session,
-  which is not what "inject an error" should mean. Use `before_commit` for
-  that, or `crash`/`delay` here.
-- `delay` at this point uses an uninterruptible sleep, because servicing
-  interrupts mid-abort could throw.
-- the name `before_abort` is kept because it names the *intent* ("when this
-  transaction is going down"); "during abort processing" is what actually
-  happens. Fixing that would require a core patch, which v0.1 explicitly
-  does not do.
-
-**Parallel workers** — hooks run in parallel workers too, but fault state is
-backend-local and a worker does not inherit the leader's configuration, so a
-fault armed in the leader never fires inside a worker. Parallel-specific
-transaction events (`XACT_EVENT_PARALLEL_*`) are ignored.
+- **`executor_start`** — fires once per executor invocation, including
+  statements inside functions, `DO` blocks and SPI, not just top-level
+  statements.
+- **`executor_end`** — fires after the executor has been torn down, so an
+  `error` here fails the statement *after* its rows have already been sent
+  to the client. The statement calling `macavity_arm()` reaches its own
+  `ExecutorEnd` right after arming; that one event is skipped, so
+  `occurrence = 1` means "the next statement", not "this one".
+- **`before_commit`** — not reached by two-phase commit (`PREPARE
+  TRANSACTION` raises `XACT_EVENT_PRE_PREPARE` instead) or by subtransaction
+  release, so faults do not fire for `PREPARE TRANSACTION` or `RELEASE
+  SAVEPOINT`. In autocommit mode, the commit of the arming statement itself
+  is not counted — otherwise the fault would fire before you could run
+  anything. Inside an explicit `BEGIN ... COMMIT` block, your own `COMMIT`
+  *is* counted, which is what makes the retry example above work.
+- **`before_abort`** — **PostgreSQL has no pre-abort hook**; this fires from
+  `AbortTransaction()`, while the abort is already under way. Consequently:
+  `error` is **rejected at arm time** here, since raising an error during
+  abort processing would escalate to `FATAL` and disconnect the session
+  (use `before_commit` for an error, or `crash`/`delay` here); `delay` uses
+  an uninterruptible sleep, since servicing interrupts mid-abort could
+  throw. The name is kept for the intent ("when this transaction is going
+  down") even though "during abort" is what actually happens.
+- **Parallel workers** — hooks run there too, but fault state is
+  backend-local, so a fault armed in the leader never fires inside a
+  worker. Parallel-specific transaction events (`XACT_EVENT_PARALLEL_*`)
+  are ignored.
 
 ## Session-local behaviour
 
-Fault configuration is a plain backend-local static variable. There is no
-shared memory, no lock, no IPC, and no background worker:
+Fault configuration is a plain backend-local static variable — no shared
+memory, no lock, no IPC, no background worker:
 
-- fault state is session-local, and **at most one fault can be armed per
-  session**
-- session A arming a fault has no effect on session B
-- multiple backends can arm different faults simultaneously without
-  interfering
+- session A arming a fault has no effect on session B; multiple backends
+  can arm different faults simultaneously without interfering
 - `hits` and `remaining` count only matching events in the session that
   armed the fault
 - state dies with the session — a disconnect is as good as a disarm, and a
   newly established session never carries the previous session's fault,
   including after that session crashed
 
-`test/session_test.sh` demonstrates all of this with two connections.
-
-One distinction worth repeating here, because it is easy to misread: when a
-`crash` fault kills a backend, PostgreSQL disconnects the *other* sessions
-too, as crash containment. That is the server terminating backends, not a
-macavity fault crossing into them — see [about crash](#about-crash).
+`test/session_test.sh` demonstrates this with two connections.
 
 ## Occurrence semantics
 
-`occurrence` is *which matching event fires the fault*, counting only events
-at the armed point, only in this session, and only after arming:
-
-```sql
-SELECT macavity_arm('executor_start', 'error', 3);
--- matching event 1 -> hits 1, remaining 2, no action
--- matching event 2 -> hits 2, remaining 1, no action
--- matching event 3 -> hits 3, remaining 0, then inject the error
-```
+`occurrence` is *which matching event fires the fault*, counting only
+events at the armed point, only in this session, and only after arming
+(events produced by the arming statement itself are not counted — see
+`executor_end` and `before_commit` above):
 
 - the default is `1`, meaning the next matching event
 - `0` and negative values are rejected
@@ -388,8 +303,6 @@ SELECT macavity_arm('executor_start', 'error', 3);
   so behaviour is one-shot even for actions that never return; the spent
   fault stays visible through `macavity_status()` until the next
   `macavity_arm()` or `macavity_disarm()`
-- events produced by the arming statement itself are not counted (see
-  `executor_end` and `before_commit` above)
 
 ## Current limitations
 
@@ -425,14 +338,14 @@ The four suites are:
 | --- | --- |
 | `macavity_basic` | API surface, arm/disarm bookkeeping, the skip that stops the arming statement counting itself |
 | `macavity_errors` | every validation path: unknown point, unknown action, `occurrence <= 0`, NULL arguments, arming twice, `error` at `before_abort` |
-| `macavity_counters` | `hits`/`remaining` after **every** matching hit at `occurrence` 1, 2 and 3; that the counters advance before the action runs; that non-matching events and aborts do not move them; that the counters are not transactional; and the armed → fired → clear states of `macavity_status()` |
+| `macavity_counters` | `hits`/`remaining` after every matching hit at `occurrence` 1, 2 and 3; that the counters advance before the action runs; that non-matching events and aborts do not move them; that the counters are not transactional; and the armed → fired → clear states of `macavity_status()` |
 | `macavity_faults` | faults that actually fire, using `error` and `delay`, at each point — including `executor_end` at `occurrence` 1, which checks that the hit is recorded (`hits` 1, `remaining` 0) even though the action raised an `ERROR` |
 
 Counter readings while a `before_commit` fault is armed are taken inside
-`BEGIN ... ROLLBACK`, because an abort is not a commit and so does not
-disturb the count. That pattern is worth keeping in mind when adding tests.
+`BEGIN ... ROLLBACK`, since an abort does not disturb the count. Keep that
+pattern in mind when adding tests.
 
-Two things cannot go in `pg_regress` and ship as scripts instead. Point them
+Two things can't go in `pg_regress` and ship as scripts instead. Point them
 at a **throwaway** cluster where `CREATE EXTENSION macavity` has been run:
 
 ```sh
@@ -441,23 +354,21 @@ test/crash_test.sh   -h /tmp -p 5432 -d contrib_regression   # CRASHES the clust
 ```
 
 - `session_test.sh` needs two concurrent connections, which a single
-  `pg_regress` session cannot provide: it shows that session A's fault fires
-  only in session A, that session B reports nothing armed, and that fault
-  state does not outlive the session that armed it. It injects only `error`,
-  so it is safe on any test cluster. Its header also documents why
-  PostgreSQL's post-crash disconnection of other backends is a different
-  thing entirely.
+  `pg_regress` session cannot provide: it shows that session A's fault
+  fires only in session A, that session B reports nothing armed, and that
+  fault state does not outlive the session that armed it. It injects only
+  `error`, so it is safe on any test cluster.
 - `crash_test.sh` covers the `crash` action: that `hits` advances on the
   matching hits leading up to the crash, that the backend dies at the
   configured occurrence and not before, that the cluster comes back, that
-  **the reconnected session reports `armed = false` with no stale
-  configuration**, and that data committed before the crash survives
+  the reconnected session reports `armed = false` with no stale
+  configuration, and that data committed before the crash survives
   recovery. `pg_regress` cannot survive a cluster-wide restart mid-run,
   which is why this is separate.
 
-The crashing hit itself cannot be read back — the counters lived in the
-backend that died — so the ordering guarantee is verified through the
-`error` action, which takes the identical code path in
+The crashing hit itself can't be read back — the counters lived in the
+backend that died — so the ordering guarantee is instead verified through
+the `error` action, which takes the identical code path in
 `macavity_event()` before the action runs.
 
 ## Architecture
@@ -478,8 +389,8 @@ rather than all of them:
  fault dispatcher            src/macavity_action.c   error / crash / delay
 ```
 
-- `src/macavity_api.c` — every user-facing message and SQLSTATE. Layers below
-  assume valid input.
+- `src/macavity_api.c` — every user-facing message and SQLSTATE. Layers
+  below assume valid input.
 - `src/macavity_state.c` — what a fault *is*, and the state machine in
   `macavity_event()` that counts the hit, tests the threshold and marks the
   fault spent, strictly in that order and always before the caller runs the
@@ -489,8 +400,8 @@ rather than all of them:
 - `src/macavity.c` — hook installation and chaining (previous hook values
   are saved and called), the executor nesting counter, and the transaction
   callback. All version-dependent signatures live here.
-- `src/macavity_action.c` — the dispatcher. Adding an action means one `case`
-  here plus one row in `macavity_action_info[]`.
+- `src/macavity_action.c` — the dispatcher. Adding an action means one
+  `case` here plus one row in `macavity_action_info[]`.
 
 Adding a fault point is: one enum value, one row in `macavity_point_info[]`,
 and one `macavity_fire()` call from the relevant hook.
