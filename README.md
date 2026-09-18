@@ -37,8 +37,10 @@ In short:
   `occurrence`, `hits`, `remaining`
 - `hits` counts matching fault-point hits; `remaining` (`occurrence - hits`)
   falls by one on every matching hit
-- **the counters are updated before the fault action is injected**, so the
-  hit that fires the fault is always recorded
+- the counters are updated before the fault action is injected, so the
+  hit that fires the fault is always recorded. However, the remaining count
+  depends on whether the configured fault point occurs at the start or end
+    of a specific operation.
 - `crash` terminates the current backend; that connection cannot restore
   itself, and PostgreSQL may terminate other backends afterwards as crash
   containment — which is not macavity state crossing sessions
@@ -88,16 +90,6 @@ No `shared_preload_libraries` entry is needed: macavity allocates no shared
 memory and installs its hooks when the library is loaded on first use. If
 you prefer to load it in every session, `session_preload_libraries =
 'macavity'` also works.
-
-`CREATE EXTENSION` requires superuser (the extension is not marked
-`trusted`), and the arming functions are revoked from `PUBLIC` — only
-superusers can arm a fault until you grant it explicitly:
-
-```sql
-GRANT EXECUTE ON FUNCTION macavity_arm(text, text, integer) TO test_harness;
-GRANT EXECUTE ON FUNCTION macavity_disarm() TO test_harness;
-GRANT EXECUTE ON FUNCTION macavity_status() TO test_harness;
-```
 
 ## Example usage
 
@@ -374,7 +366,7 @@ shared memory, no lock, no IPC, and no background worker:
 One distinction worth repeating here, because it is easy to misread: when a
 `crash` fault kills a backend, PostgreSQL disconnects the *other* sessions
 too, as crash containment. That is the server terminating backends, not a
-macavity fault crossing into them — see [About `crash`](#about-crash).
+macavity fault crossing into them — see [about crash](#about-crash).
 
 ## Occurrence semantics
 
