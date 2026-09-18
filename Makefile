@@ -16,7 +16,7 @@ PGFILEDESC = "macavity - deterministic fault injection for testing"
 # output.  The crash action is covered separately by test/crash_test.sh,
 # because a crashing backend makes the postmaster reset the cluster and
 # pg_regress cannot survive that.
-REGRESS = macavity_basic macavity_errors macavity_faults
+REGRESS = macavity_basic macavity_errors macavity_counters macavity_faults
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
