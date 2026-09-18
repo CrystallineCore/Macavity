@@ -16,6 +16,13 @@
 #include "fmgr.h"
 
 /*
+ * macavity targets PostgreSQL 16 and later.
+ */
+#if PG_VERSION_NUM < 160000
+#error "macavity requires PostgreSQL 16 or later"
+#endif
+
+/*
  * Duration of the "delay" action.  v0.1 deliberately does not expose this
  * through the SQL API; a later version can add an optional argument without
  * breaking the existing signature.
@@ -54,15 +61,26 @@ typedef struct MacavityNameInfo
 } MacavityNameInfo;
 
 /*
- * The fault armed in *this* backend.
- *
- * Fault configuration is intentionally a plain backend-local static.  No
- * shared memory, locks or IPC are involved, so one session can neither
- * observe nor disturb another session's configuration.
- */
+* Fault configuration is intentionally a plain backend-local static. No
+* shared memory, locks or IPC are involved, so one session cannot observe
+* another session's Macavity fault configuration.
+*
+* This does not mean that an injected backend crash is isolated from other
+* PostgreSQL sessions at the process level. PostgreSQL may terminate other
+* server processes after detecting a backend crash as part of its crash
+* recovery and shared-memory safety mechanisms. Those sessions may therefore
+* lose their connections, even though their Macavity state is not shared
+* with the crashing session.
+*
+* It is also not transactional: an injected ERROR aborts the transaction
+* but does not roll the counters back, which lets a caller confirm
+* afterwards that the hit was recorded.
+*/
+
 typedef struct MacavityFaultState
 {
-	bool		armed;
+	bool		armed;			/* waiting for its occurrence */
+	bool		fired;			/* has fired; counters below are final */
 	MacavityPoint point;
 	MacavityAction action;
 	int32		occurrence;		/* which matching event fires the fault */
@@ -72,7 +90,7 @@ typedef struct MacavityFaultState
 	 * Bookkeeping that keeps the statement/transaction which armed the fault
 	 * from being counted as a matching event.  See macavity_state.c.
 	 */
-	int		skip_exec_end_depth;	/* -1 when unused */
+	int             skip_exec_end_depth;	/* -1 when unused */
 	bool		skip_xact_event;
 } MacavityFaultState;
 
@@ -96,9 +114,13 @@ extern void macavity_fault_disarm(void);
 extern void macavity_set_xact_skip(void);
 
 /*
- * Count one event at 'point'.  Returns true (and stores the configured
- * action in *action) when this event is the configured occurrence.  The
- * fault is disarmed before returning: v0.1 faults are strictly one-shot.
+ * Record one matching event at 'point' and decide whether it fires.
+ *
+ * The hit is counted first, unconditionally.  Only then is the occurrence
+ * threshold tested; if it is reached, the fault is marked spent (armed
+ * false, fired true, counters kept) and true is returned with the
+ * configured action stored in *action.  The caller runs the action
+ * afterwards, so the recorded hit survives an action that never returns.
  */
 extern bool macavity_event(MacavityPoint point, MacavityAction *action);
 
