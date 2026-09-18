@@ -1,0 +1,56 @@
+{
+  "name": "macavity",
+  "abstract": "Deterministic, session-local fault injection for testing",
+  "description": "Macavity lets a PostgreSQL session arm a one-shot fault at a supported execution point -- executor start, executor end, before commit, or during abort -- and then deterministically inject an error, a delay, or an unclean backend crash at a chosen occurrence. Fault configuration is backend-local, so sessions never interfere with each other. This is DESTRUCTIVE testing infrastructure for development and test clusters only: the crash action SIGKILLs the calling backend, which makes the postmaster reset the cluster and run crash recovery.",
+  "version": "0.1.0",
+  "maintainer": [
+    "Sivaprasad Murali <sivaprasad.off@gmail.com>"
+  ],
+  "license": "mit",
+  "provides": {
+    "macavity": {
+      "file": "sql/macavity--0.1.0.sql",
+      "docfile": "README.md",
+      "version": "0.1.0"
+    }
+  },
+  "tags": [
+    "fault-injection",
+    "fault injection",
+    "testing",
+    "test",
+    "crash",
+    "crash-recovery",
+    "recovery",
+    "error-injection",
+    "chaos",
+    "chaos-engineering",
+    "hooks",
+    "executor",
+    "transaction",
+    "commit",
+    "deterministic",
+    "debugging",
+    "qa",
+    "postgresql extension"
+  ],
+  "release_status": "testing",
+  "resources": {
+    "homepage": "https://github.com/crystallinecore/macavity",
+    "repository": {
+      "url": "https://github.com/crystallinecore/macavity",
+      "web": "https://github.com/crystallinecore/macavity",
+      "type": "git"
+    },
+    "bugtracker": {
+      "web": "https://github.com/crystallinecore/macavity/issues"
+    }
+  },
+  "x_requires": {
+    "PostgreSQL": ">=16.0"
+  },
+  "meta-spec": {
+    "version": "1.0.0",
+    "url": "https://pgxn.org/meta/spec.txt"
+  }
+}
