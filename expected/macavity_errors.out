@@ -1,0 +1,52 @@
+--
+-- macavity: input validation.  Every case here must fail, and none of them
+-- may leave a fault armed.
+--
+-- unknown fault point
+SELECT macavity_arm('wal_insert', 'error');
+ERROR:  macavity: unrecognized fault point "wal_insert"
+HINT:  Supported fault points are: executor_start, executor_end, before_commit, before_abort. See macavity_points().
+SELECT macavity_arm('', 'error');
+ERROR:  macavity: unrecognized fault point ""
+HINT:  Supported fault points are: executor_start, executor_end, before_commit, before_abort. See macavity_points().
+SELECT macavity_arm('EXECUTOR_START', 'error');
+ERROR:  macavity: unrecognized fault point "EXECUTOR_START"
+HINT:  Supported fault points are: executor_start, executor_end, before_commit, before_abort. See macavity_points().
+-- unknown action
+SELECT macavity_arm('executor_start', 'panic');
+ERROR:  macavity: unrecognized action "panic"
+HINT:  Supported actions are: error, crash, delay.
+SELECT macavity_arm('executor_start', 'ERROR');
+ERROR:  macavity: unrecognized action "ERROR"
+HINT:  Supported actions are: error, crash, delay.
+-- occurrence must be positive
+SELECT macavity_arm('executor_start', 'error', 0);
+ERROR:  macavity: occurrence must be greater than zero, got 0
+SELECT macavity_arm('executor_start', 'error', -1);
+ERROR:  macavity: occurrence must be greater than zero, got -1
+-- nulls are reported, not silently ignored
+SELECT macavity_arm(NULL, 'error');
+ERROR:  macavity: point, action and occurrence must not be null
+SELECT macavity_arm('executor_start', NULL);
+ERROR:  macavity: point, action and occurrence must not be null
+SELECT macavity_arm('executor_start', 'error', NULL);
+ERROR:  macavity: point, action and occurrence must not be null
+-- 'error' cannot be injected into abort processing
+SELECT macavity_arm('before_abort', 'error');
+ERROR:  macavity: action "error" is not supported at fault point "before_abort"
+DETAIL:  PostgreSQL has no pre-abort hook; the abort is already in progress when this point is reached, so raising an error there would escalate to FATAL.
+HINT:  Use action "crash" or "delay" at "before_abort", or arm "error" at "before_commit".
+-- nothing above may have armed anything
+SELECT * FROM macavity_status();
+ armed | point | action | occurrence | hits | remaining 
+-------+-------+--------+------------+------+-----------
+ f     |       |        |            |      |          
+(1 row)
+
+-- the point/action lists are still intact after all that
+SELECT count(*) AS points FROM macavity_points();
+ points 
+--------
+      4
+(1 row)
+

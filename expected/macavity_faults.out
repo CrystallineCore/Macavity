@@ -1,0 +1,188 @@
+--
+-- macavity: faults that actually fire.
+--
+-- Only 'error' and 'delay' are exercised here.  'crash' cannot be tested
+-- under pg_regress -- an unclean backend exit makes the postmaster reset
+-- the cluster -- so it has its own harness in test/crash_test.sh.
+--
+-- error at executor_start, next matching event
+SELECT macavity_arm('executor_start', 'error');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT 1 AS never_runs;
+ERROR:  macavity: injected error at fault point "executor_start"
+-- the fault is one-shot: it disarmed itself when it fired
+SELECT * FROM macavity_status();
+ armed | point | action | occurrence | hits | remaining 
+-------+-------+--------+------------+------+-----------
+ f     |       |        |            |      |          
+(1 row)
+
+SELECT 1 AS runs_normally;
+ runs_normally 
+---------------
+             1
+(1 row)
+
+-- occurrence counting: events 1 and 2 pass through, event 3 fails
+SELECT macavity_arm('executor_start', 'error', 3);
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT 1 AS event_one;
+ event_one 
+-----------
+         1
+(1 row)
+
+SELECT hits, remaining FROM macavity_status();
+ hits | remaining 
+------+-----------
+    2 |         1
+(1 row)
+
+SELECT 3 AS event_three_fails;
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- error at executor_end
+SELECT macavity_arm('executor_end', 'error');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT 1 AS statement_whose_end_fails;
+ERROR:  macavity: injected error at fault point "executor_end"
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- before_commit inside an explicit transaction block: the user's own COMMIT
+-- is the matching event, so the transaction is rolled back instead
+BEGIN;
+SELECT macavity_arm('before_commit', 'error');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+CREATE TEMP TABLE macavity_commit_victim (i int);
+INSERT INTO macavity_commit_victim VALUES (1);
+COMMIT;
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- the table did not survive the failed commit
+SELECT count(*) FROM pg_class WHERE relname = 'macavity_commit_victim';
+ count 
+-------
+     0
+(1 row)
+
+-- before_commit in autocommit mode: the arming statement's own implicit
+-- commit is not counted, so the fault survives to trip the next statement
+SELECT macavity_arm('before_commit', 'error');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT 1 AS commits_and_then_fails;
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- before_abort during abort processing: the delay runs, then the original
+-- error is reported as usual
+SELECT macavity_arm('before_abort', 'delay');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+DO $$ BEGIN RAISE EXCEPTION 'macavity test: forcing an abort'; END $$;
+ERROR:  macavity test: forcing an abort
+CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- delay really delays: the statement observes at least most of the 1 s
+-- sleep between its start and the clock read during execution
+SELECT macavity_arm('executor_start', 'delay');
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT clock_timestamp() - statement_timestamp() >= interval '0.5 second'
+	AS delayed;
+ delayed 
+---------
+ t
+(1 row)
+
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- a disarmed fault never fires, however many events go by
+SELECT macavity_arm('executor_start', 'error', 2);
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
+SELECT 1 AS safe_one;
+ safe_one 
+----------
+        1
+(1 row)
+
+SELECT 2 AS safe_two;
+ safe_two 
+----------
+        2
+(1 row)
+
+SELECT 3 AS safe_three;
+ safe_three 
+------------
+          3
+(1 row)
+
+SELECT * FROM macavity_status();
+ armed | point | action | occurrence | hits | remaining 
+-------+-------+--------+------------+------+-----------
+ f     |       |        |            |      |          
+(1 row)
+

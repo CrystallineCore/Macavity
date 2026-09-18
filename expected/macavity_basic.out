@@ -1,0 +1,123 @@
+--
+-- macavity: API surface -- points, status, arm/disarm bookkeeping.
+--
+-- No fault may fire in this file: every fault armed here uses an
+-- occurrence far beyond the number of events the file produces.  The
+-- default occurrence (1) and faults that really fire are covered by
+-- macavity_faults.sql.
+--
+CREATE EXTENSION macavity;
+-- Every advertised point must be implemented; this list is the contract.
+SELECT point, description FROM macavity_points() ORDER BY point;
+     point      |                         description                          
+----------------+--------------------------------------------------------------
+ before_abort   | during transaction abort processing (XACT_EVENT_ABORT)
+ before_commit  | before transaction commit processing (XACT_EVENT_PRE_COMMIT)
+ executor_end   | after executor execution completes (ExecutorEnd_hook)
+ executor_start | before executor execution begins (ExecutorStart_hook)
+(4 rows)
+
+-- Nothing armed yet: armed is false, everything else NULL.
+SELECT * FROM macavity_status();
+ armed | point | action | occurrence | hits | remaining 
+-------+-------+--------+------------+------+-----------
+ f     |       |        |            |      |          
+(1 row)
+
+-- Arming reports through status().  The occurrence is remembered verbatim.
+SELECT macavity_arm('executor_start', 'error', 400);
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT armed, point, action, occurrence FROM macavity_status();
+ armed |     point      | action | occurrence 
+-------+----------------+--------+------------
+ t     | executor_start | error  |        400
+(1 row)
+
+-- Arming again is refused rather than silently replacing the armed fault.
+SELECT macavity_arm('executor_end', 'delay');
+ERROR:  macavity: a fault is already armed in this session
+DETAIL:  Fault point "executor_start" with action "error" is armed at occurrence 400 (2 matching events so far).
+HINT:  Call macavity_disarm() first.
+SELECT armed, point, action, occurrence FROM macavity_status();
+ armed |     point      | action | occurrence 
+-------+----------------+--------+------------
+ t     | executor_start | error  |        400
+(1 row)
+
+-- Disarm returns us to the empty state ...
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
+SELECT * FROM macavity_status();
+ armed | point | action | occurrence | hits | remaining 
+-------+-------+--------+------------+------+-----------
+ f     |       |        |            |      |          
+(1 row)
+
+-- ... and is a no-op when nothing is armed.
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
+-- Arming does not count the arming statement itself.  Arm executor_end at
+-- a high occurrence and watch the counter: right after arming hits is 0,
+-- because the arming statement's own ExecutorEnd was skipped.  Every
+-- statement after it -- including each status query -- counts one event, so
+-- the second status query reports 2.
+SELECT macavity_arm('executor_end', 'error', 500);
+ macavity_arm 
+--------------
+ 
+(1 row)
+
+SELECT hits, remaining FROM macavity_status();
+ hits | remaining 
+------+-----------
+    0 |       500
+(1 row)
+
+SELECT 1 AS first_statement;
+ first_statement 
+-----------------
+               1
+(1 row)
+
+SELECT hits, remaining FROM macavity_status();
+ hits | remaining 
+------+-----------
+    2 |       498
+(1 row)
+
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
+SELECT armed FROM macavity_status();
+ armed 
+-------
+ f
+(1 row)
+
