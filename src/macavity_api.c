@@ -145,8 +145,19 @@ macavity_disarm(PG_FUNCTION_ARGS)
 /*
  * macavity_status()
  *
- * One row describing this session's armed fault.  When nothing is armed,
- * armed is false and every other column is NULL.
+ * One row describing this session's fault, in one of three states:
+ *
+ *	armed		armed is true; hits counts the matching events seen so far
+ *				and remaining is occurrence - hits.
+ *	fired		armed is false, but the point, action and final counters are
+ *				still reported, so a caller can confirm after the fact that
+ *				the hit was recorded before the action ran (remaining is 0).
+ *	clear		nothing armed and nothing fired since the last disarm (or a
+ *				brand-new session): armed is false and every other column is
+ *				NULL.
+ *
+ * "fired" and "clear" are told apart by point being non-NULL in the first
+ * and NULL in the second.
  */
 Datum
 macavity_status(PG_FUNCTION_ARGS)
@@ -164,7 +175,7 @@ macavity_status(PG_FUNCTION_ARGS)
 
 	values[0] = BoolGetDatum(state->armed);
 
-	if (!state->armed)
+	if (!state->armed && !state->fired)
 	{
 		for (int i = 1; i < MACAVITY_STATUS_COLS; i++)
 			nulls[i] = true;
@@ -192,11 +203,7 @@ macavity_points(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
-#if PG_VERSION_NUM >= 150000
 	InitMaterializedSRF(fcinfo, 0);
-#else
-	SetSingleFuncCall(fcinfo, 0);
-#endif
 
 	for (int i = 0; i < MACAVITY_NUM_POINTS; i++)
 	{

@@ -75,12 +75,21 @@ macavity_do_delay(bool interrupts_safe)
  *
  * Terminate *this* backend immediately and uncleanly.
  *
+ * The hit has already been counted by macavity_event(); this function is
+ * reached only after the state machine has recorded it.
+ *
  * SIGKILL is sent to MyProcPid and to nothing else: macavity never signals
- * the postmaster and never signals another backend.  Note, however, that
- * PostgreSQL's own architecture means an unclean backend exit causes the
- * postmaster to reset the whole cluster and run crash recovery, which
- * disconnects other sessions.  That is inherent to simulating a crash and
- * is exactly why this extension is for test clusters only.
+ * the postmaster and never signals another backend.  The connection that
+ * armed the fault dies with the backend and cannot restore itself -- the
+ * client must reconnect, and the new session starts with no fault armed,
+ * because this state lives only in the backend that is now gone.
+ *
+ * PostgreSQL then applies its own crash containment: the postmaster
+ * terminates the remaining backends ("terminating connection because of
+ * crash of another server process") and runs crash recovery.  That is the
+ * server protecting shared memory after an unclean exit, not macavity fault
+ * state reaching another session, and it is exactly why this extension is
+ * for test clusters only.
  */
 static void
 macavity_do_crash(MacavityPoint point)

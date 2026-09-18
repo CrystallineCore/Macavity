@@ -39,6 +39,7 @@ const MacavityNameInfo macavity_action_info[MACAVITY_NUM_ACTIONS] = {
  */
 static MacavityFaultState fault_state = {
 	.armed = false,
+	.fired = false,
 	.point = MACAVITY_POINT_INVALID,
 	.action = MACAVITY_ACTION_INVALID,
 	.occurrence = 0,
@@ -123,6 +124,7 @@ macavity_fault_arm(MacavityPoint point, MacavityAction action, int32 occurrence)
 	Assert(occurrence > 0);
 
 	fault_state.armed = true;
+	fault_state.fired = false;		/* forget any previously spent fault */
 	fault_state.point = point;
 	fault_state.action = action;
 	fault_state.occurrence = occurrence;
@@ -134,10 +136,18 @@ macavity_fault_arm(MacavityPoint point, MacavityAction action, int32 occurrence)
 		fault_state.skip_exec_end_depth = macavity_exec_nesting - 1;
 }
 
+/*
+ * macavity_fault_disarm
+ *
+ * Clear the fault state completely, including the record of a fault that
+ * has already fired.  After this the session is indistinguishable from one
+ * that has never armed anything.
+ */
 void
 macavity_fault_disarm(void)
 {
 	fault_state.armed = false;
+	fault_state.fired = false;
 	fault_state.point = MACAVITY_POINT_INVALID;
 	fault_state.action = MACAVITY_ACTION_INVALID;
 	fault_state.occurrence = 0;
@@ -205,11 +215,29 @@ macavity_xact_cleanup(void)
 /*
  * macavity_event
  *
- * Count one matching event and decide whether it fires the fault.
+ * Record one matching event and decide whether it fires the fault.
  *
- * The fault is disarmed *before* the action runs, which makes the behaviour
- * one-shot even for actions that never return normally (error, crash) and
- * removes any chance of the fault re-firing while the error is unwound.
+ * Order matters here, and it is the whole point of this function:
+ *
+ *		1. the hit is counted	 (hits++, so remaining falls by one)
+ *		2. the threshold is tested
+ *		3. the fault is marked spent
+ *		4. ... and only then does the caller run the action
+ *
+ * Counting first means the hit is recorded even when the action never
+ * returns -- an injected ERROR unwinds past the caller, and 'crash' kills
+ * the backend outright.  If the counter were bumped afterwards, the very
+ * hit that fired the fault would be the one missing from
+ * macavity_status().
+ *
+ * Marking the fault spent before the action also makes the behaviour
+ * reliably one-shot: there is no window in which the error being unwound
+ * could re-enter the hook and fire the fault a second time.
+ *
+ * Spent is not the same as disarmed.  'armed' goes false so nothing fires
+ * again, but the point, action, occurrence and counters are kept so the
+ * caller can confirm afterwards what happened; macavity_fault_disarm() is
+ * what actually clears them.
  */
 bool
 macavity_event(MacavityPoint point, MacavityAction *action)
@@ -219,12 +247,20 @@ macavity_event(MacavityPoint point, MacavityAction *action)
 	if (fault_state.point != point)
 		return false;
 
+	/* 1. record the hit, before anything can stop us doing so */
 	fault_state.hits++;
 
+	/* 2. not this one? leave the fault armed and keep counting */
 	if (fault_state.hits < fault_state.occurrence)
 		return false;
 
+	/* 3. this is the configured occurrence: spend the fault */
+	fault_state.armed = false;
+	fault_state.fired = true;
+	fault_state.skip_exec_end_depth = -1;
+	fault_state.skip_xact_event = false;
+
+	/* 4. the caller runs this once we return */
 	*action = fault_state.action;
-	macavity_fault_disarm();
 	return true;
 }

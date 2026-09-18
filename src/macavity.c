@@ -42,14 +42,19 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
  * Executor nesting depth.  0 means "no ExecutorRun/ExecutorFinish is
  * currently on the stack in this backend".
  */
-int		macavity_exec_nesting = 0;
+int  macavity_exec_nesting = 0;
 
 /*
  * macavity_fire
  *
- * Count one event at 'point' and run the action if this is the configured
- * occurrence.  Note that macavity_event() disarms the fault before we get
- * here, so an action that throws (or kills the backend) cannot re-enter.
+ * Record one event at 'point' and run the action if this is the configured
+ * occurrence.
+ *
+ * macavity_event() has already counted the hit and marked the fault spent
+ * by the time it returns true, so the action below runs with the counters
+ * final: an error thrown here, or a backend that never comes back from
+ * here, still leaves the hit recorded, and the spent fault cannot re-enter
+ * while the error is unwound.
  */
 static void
 macavity_fire(MacavityPoint point)
