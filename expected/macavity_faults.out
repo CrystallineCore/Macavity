@@ -14,17 +14,25 @@ SELECT macavity_arm('executor_start', 'error');
 
 SELECT 1 AS never_runs;
 ERROR:  macavity: injected error at fault point "executor_start"
--- the fault is one-shot: it disarmed itself when it fired
+-- the fault is one-shot: it is spent, so armed is false.  The hit that
+-- fired it was recorded before the error was raised, so the counters are
+-- still reported: hits 1, remaining 0.
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
+ armed |     point      | action | occurrence | hits | remaining 
+-------+----------------+--------+------------+------+-----------
+ f     | executor_start | error  |          1 |    1 |         0
 (1 row)
 
 SELECT 1 AS runs_normally;
  runs_normally 
 ---------------
              1
+(1 row)
+
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
 (1 row)
 
 -- occurrence counting: events 1 and 2 pass through, event 3 fails
@@ -54,7 +62,8 @@ SELECT armed FROM macavity_status();
  f
 (1 row)
 
--- error at executor_end
+-- error at executor_end with occurrence 1: the next statement's own
+-- ExecutorEnd is the matching hit
 SELECT macavity_arm('executor_end', 'error');
  macavity_arm 
 --------------
@@ -63,6 +72,19 @@ SELECT macavity_arm('executor_end', 'error');
 
 SELECT 1 AS statement_whose_end_fails;
 ERROR:  macavity: injected error at fault point "executor_end"
+-- the hit was recorded before the error: fired, hits 1, remaining 0
+SELECT armed, point, action, occurrence, hits, remaining FROM macavity_status();
+ armed |    point     | action | occurrence | hits | remaining 
+-------+--------------+--------+------------+------+-----------
+ f     | executor_end | error  |          1 |    1 |         0
+(1 row)
+
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ 
+(1 row)
+
 SELECT armed FROM macavity_status();
  armed 
 -------

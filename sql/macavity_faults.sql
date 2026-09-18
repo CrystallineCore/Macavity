@@ -9,9 +9,12 @@
 SELECT macavity_arm('executor_start', 'error');
 SELECT 1 AS never_runs;
 
--- the fault is one-shot: it disarmed itself when it fired
+-- the fault is one-shot: it is spent, so armed is false.  The hit that
+-- fired it was recorded before the error was raised, so the counters are
+-- still reported: hits 1, remaining 0.
 SELECT * FROM macavity_status();
 SELECT 1 AS runs_normally;
+SELECT macavity_disarm();
 
 -- occurrence counting: events 1 and 2 pass through, event 3 fails
 SELECT macavity_arm('executor_start', 'error', 3);
@@ -20,9 +23,13 @@ SELECT hits, remaining FROM macavity_status();
 SELECT 3 AS event_three_fails;
 SELECT armed FROM macavity_status();
 
--- error at executor_end
+-- error at executor_end with occurrence 1: the next statement's own
+-- ExecutorEnd is the matching hit
 SELECT macavity_arm('executor_end', 'error');
 SELECT 1 AS statement_whose_end_fails;
+-- the hit was recorded before the error: fired, hits 1, remaining 0
+SELECT armed, point, action, occurrence, hits, remaining FROM macavity_status();
+SELECT macavity_disarm();
 SELECT armed FROM macavity_status();
 
 -- before_commit inside an explicit transaction block: the user's own COMMIT

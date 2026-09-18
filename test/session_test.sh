@@ -9,6 +9,18 @@
 # Nothing here crashes anything: only the 'error' action is used, and it is
 # safe to run against any test cluster.
 #
+# Scope note.  What is demonstrated here is that macavity's own fault
+# configuration never crosses sessions: it is a backend-local variable, so
+# session B cannot inherit, observe or be fired by session A's fault.
+#
+# That is a separate matter from what PostgreSQL does after a backend
+# crashes.  When the 'crash' action kills a backend, the postmaster
+# terminates the other backends as well and runs crash recovery, and those
+# clients see "terminating connection because of crash of another server
+# process".  Those sessions are disconnected by the server's crash
+# containment; they did not inherit a macavity fault, and none of them ever
+# had one armed.  See test/crash_test.sh.
+#
 # Usage:
 #	test/session_test.sh [psql connection options]
 #
