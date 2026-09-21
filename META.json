@@ -1,17 +1,17 @@
 {
   "name": "macavity",
   "abstract": "Deterministic, session-local fault injection for testing",
-  "description": "Macavity lets a PostgreSQL session arm a one-shot fault at a supported execution point -- executor start, executor end, before commit, or during abort -- and then deterministically inject an error, a delay, or an unclean backend crash at a chosen occurrence. Fault configuration is backend-local, so sessions never interfere with each other. This is DESTRUCTIVE testing infrastructure for development and test clusters only: the crash action SIGKILLs the calling backend, which makes the postmaster reset the cluster and run crash recovery.",
-  "version": "0.1.0",
+  "description": "Macavity lets a PostgreSQL session arm any number of fault events at supported execution points -- executor start, executor end, before commit, or during abort -- and then deterministically inject an error, a delay, or an unclean backend crash at a chosen occurrence. Events live in a backend-local registry with stable IDs, independent counters and armed/completed/disarmed states, and can be reinstated after they fire; sessions never interfere with each other. This is DESTRUCTIVE testing infrastructure for development and test clusters only: the crash action SIGKILLs the calling backend, which makes the postmaster reset the cluster and run crash recovery.",
+  "version": "0.2.0",
   "maintainer": [
     "Sivaprasad Murali <sivaprasad.off@gmail.com>"
   ],
   "license": "mit",
   "provides": {
     "macavity": {
-      "file": "sql/macavity--0.1.0.sql",
+      "file": "sql/macavity--0.2.0.sql",
       "docfile": "README.md",
-      "version": "0.1.0"
+      "version": "0.2.0"
     }
   },
   "tags": [
