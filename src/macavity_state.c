@@ -24,7 +24,7 @@ const MacavityNameInfo macavity_point_info[MACAVITY_NUM_POINTS] = {
 	{"executor_start", "before executor execution begins (ExecutorStart_hook)"},
 	{"executor_end", "after executor execution completes (ExecutorEnd_hook)"},
 	{"before_commit", "before transaction commit processing (XACT_EVENT_PRE_COMMIT)"},
-	{"before_abort", "during transaction abort processing (XACT_EVENT_ABORT)"}
+	{"before_abort", "during top-level transaction abort, not subtransaction rollback (XACT_EVENT_ABORT)"}
 };
 
 const MacavityNameInfo macavity_action_info[MACAVITY_NUM_ACTIONS] = {
@@ -78,6 +78,9 @@ static MacavityBucket buckets[MACAVITY_NUM_POINTS][MACAVITY_NUM_ACTIONS];
 
 /* true while some event may have skip_xact_event set */
 static bool xact_skip_pending = false;
+
+/* true while some event may have skip_exec_end_depth >= 0 */
+static bool exec_skip_pending = false;
 
 /* Hard ceiling on the registry, well below int32 and MaxAllocSize. */
 #define MACAVITY_MAX_EVENTS \
@@ -202,7 +205,11 @@ registry_grow(void *array, int32 *capacity, int32 needed, Size elemsize)
  *	 runs at one nesting level below the level we are currently executing at
  *	 (ExecutorEnd is called after ExecutorRun has returned and the hook layer
  *	 has decremented the counter).  Remember that depth and skip exactly one
- *	 hit there.
+ *	 hit there.  If the arming statement fails instead, its ExecutorEnd never
+ *	 runs, so the skip is dropped when the error unwinds past that depth
+ *	 (macavity_exec_unwound()) and, as a backstop, at transaction end
+ *	 (macavity_xact_cleanup()).  Otherwise it would swallow the next
+ *	 legitimate hit and the event would fire one statement late.
  *
  * - before_commit / before_abort: only skip when we are NOT inside an
  *	 explicit transaction block.  In autocommit mode the imminent commit
@@ -220,7 +227,11 @@ event_start(MacavityEvent *ev)
 	ev->skip_xact_event = false;
 
 	if (ev->point == MACAVITY_POINT_EXECUTOR_END)
+	{
 		ev->skip_exec_end_depth = macavity_exec_nesting - 1;
+		if (ev->skip_exec_end_depth >= 0)
+			exec_skip_pending = true;
+	}
 }
 
 /* Leave the armed state: nothing about the arming statement matters now. */
@@ -366,6 +377,7 @@ macavity_registry_reset(void)
 	max_events = 0;
 	memset(buckets, 0, sizeof(buckets));
 	xact_skip_pending = false;
+	exec_skip_pending = false;
 
 	return discarded;
 }
@@ -387,25 +399,59 @@ macavity_event_set_xact_skip(int32 event_id)
 }
 
 /*
+ * macavity_exec_unwound
+ *
+ * An error has propagated out of ExecutorRun or ExecutorFinish, and the
+ * executor nesting depth is back at 'depth'.  Every query that was running
+ * at 'depth' or deeper has been abandoned and will never reach ExecutorEnd,
+ * so any executor_end skip reserved for one of them is stale: drop it.
+ *
+ * Runs inside PG_CATCH, so it must not throw.
+ */
+void
+macavity_exec_unwound(int depth)
+{
+	if (!exec_skip_pending)
+		return;
+
+	for (int32 i = 0; i < num_events; i++)
+	{
+		if (events[i].skip_exec_end_depth >= depth)
+			events[i].skip_exec_end_depth = -1;
+	}
+}
+
+/*
  * macavity_xact_cleanup
  *
- * Called at the end of every transaction.  The pending-skip flags are
- * transient state about a specific transaction and must never leak into the
- * next one; the events themselves deliberately survive, so an event can be
- * armed in one transaction and fire in a later one.
+ * Called at the end of every transaction, commit or abort.  The pending-skip
+ * flags are transient state about a specific statement or transaction and
+ * must never leak into the next one; the events themselves deliberately
+ * survive, so an event can be armed in one transaction and fire in a later
+ * one.
  *
- * xact_skip_pending keeps this free for the common case of no skip having
+ * By the time the COMMIT or ABORT callback runs, every portal of the
+ * transaction has been dropped, so any executor_end skip still pending
+ * belongs to a statement that will never reach ExecutorEnd.
+ * macavity_exec_unwound() normally clears those already; this is the
+ * backstop for failures outside ExecutorRun/ExecutorFinish.
+ *
+ * The *_pending flags keep this free for the common case of no skip having
  * been set in this transaction.
  */
 void
 macavity_xact_cleanup(void)
 {
-	if (!xact_skip_pending)
+	if (!xact_skip_pending && !exec_skip_pending)
 		return;
 
 	for (int32 i = 0; i < num_events; i++)
+	{
 		events[i].skip_xact_event = false;
+		events[i].skip_exec_end_depth = -1;
+	}
 	xact_skip_pending = false;
+	exec_skip_pending = false;
 }
 
 /*

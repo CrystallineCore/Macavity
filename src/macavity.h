@@ -164,7 +164,13 @@ extern void macavity_event_set_xact_skip(int32 event_id);
 extern void macavity_event_scan_begin(MacavityPoint point, MacavityEventScan *scan);
 extern bool macavity_event_next(MacavityEventScan *scan, MacavityAction *action);
 
-/* Called at the end of every transaction. */
+/*
+ * Called by the hook layer when an error unwinds out of ExecutorRun or
+ * ExecutorFinish, leaving the executor nesting depth at 'depth'.
+ */
+extern void macavity_exec_unwound(int depth);
+
+/* Called at the end of every transaction, commit or abort. */
 extern void macavity_xact_cleanup(void);
 
 /* --- fault action execution (macavity_action.c) -------------------------- */

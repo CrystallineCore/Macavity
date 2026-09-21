@@ -89,9 +89,17 @@ mac_ExecutorStart(QueryDesc *queryDesc, int eflags)
 /*
  * ExecutorRun_hook / ExecutorFinish_hook
  *
- * Nesting bookkeeping only.  PG_FINALLY keeps the counter correct when the
- * executed query throws -- including when the error is one macavity itself
- * injected.
+ * Nesting bookkeeping only.  The PG_CATCH path keeps the counter correct
+ * when the executed query throws -- including when the error is one
+ * macavity itself injected.
+ *
+ * An error that propagates out of ExecutorRun/ExecutorFinish at a given
+ * depth means the query running at that depth is dead: PostgreSQL does not
+ * call ExecutorEnd for it.  If that query armed an executor_end event, the
+ * one-shot skip reserved for its ExecutorEnd would otherwise stay pending
+ * and swallow the next legitimate hit at that depth, so it is dropped here.
+ * This also covers errors caught by a PL/pgSQL exception block, where no
+ * transaction-level abort happens.
  */
 #if PG_VERSION_NUM >= 180000
 /* execute_once was removed from the executor API in PostgreSQL 18. */
@@ -116,11 +124,14 @@ static void mac_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint6
 			standard_ExecutorRun(queryDesc, direction, count, execute_once);
 #endif
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		macavity_exec_nesting--;
+		macavity_exec_unwound(macavity_exec_nesting);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	macavity_exec_nesting--;
 }
 
 static void
@@ -134,11 +145,14 @@ mac_ExecutorFinish(QueryDesc *queryDesc)
 		else
 			standard_ExecutorFinish(queryDesc);
 	}
-	PG_FINALLY();
+	PG_CATCH();
 	{
 		macavity_exec_nesting--;
+		macavity_exec_unwound(macavity_exec_nesting);
+		PG_RE_THROW();
 	}
 	PG_END_TRY();
+	macavity_exec_nesting--;
 }
 
 /*
