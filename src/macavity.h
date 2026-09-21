@@ -12,7 +12,6 @@
 #define MACAVITY_H
 
 #include "postgres.h"
-
 #include "fmgr.h"
 
 /*
@@ -23,7 +22,7 @@
 #endif
 
 /*
- * Duration of the "delay" action.  v0.1 deliberately does not expose this
+ * Duration of the "delay" action.  macavity does not yet expose this
  * through the SQL API; a later version can add an optional argument without
  * breaking the existing signature.
  */
@@ -61,72 +60,111 @@ typedef struct MacavityNameInfo
 } MacavityNameInfo;
 
 /*
-* Fault configuration is intentionally a plain backend-local static. No
-* shared memory, locks or IPC are involved, so one session cannot observe
-* another session's Macavity fault configuration.
-*
-* This does not mean that an injected backend crash is isolated from other
-* PostgreSQL sessions at the process level. PostgreSQL may terminate other
-* server processes after detecting a backend crash as part of its crash
-* recovery and shared-memory safety mechanisms. Those sessions may therefore
-* lose their connections, even though their Macavity state is not shared
-* with the crashing session.
-*
-* It is also not transactional: an injected ERROR aborts the transaction
-* but does not roll the counters back, which lets a caller confirm
-* afterwards that the hit was recorded.
-*/
-
-typedef struct MacavityFaultState
+ * Lifecycle state of one event.  Keep in sync with macavity_event_state_name().
+ *
+ *		armed		-- waiting for its occurrence; the only state that fires
+ *		completed	-- reached its occurrence and fired (armed -> completed)
+ *		disarmed	        -- cancelled by macavity_disarm() (armed -> disarmed)
+ *
+ * macavity_arm(event_id) takes a completed or disarmed event back to armed.
+ */
+typedef enum MacavityEventState
 {
-	bool		armed;			/* waiting for its occurrence */
-	bool		fired;			/* has fired; counters below are final */
-	MacavityPoint point;
-	MacavityAction action;
-	int32		occurrence;		/* which matching event fires the fault */
-	int32		hits;			/* matching events counted so far */
+	MACAVITY_EVENT_ARMED = 0,
+	MACAVITY_EVENT_COMPLETED,
+	MACAVITY_EVENT_DISARMED
+} MacavityEventState;
+
+/*
+ * The event registry is intentionally plain backend-local memory.  No
+ * shared memory, locks or IPC are involved, so one session cannot observe
+ * another session's Macavity events.
+ *
+ * This does not mean that an injected backend crash is isolated from other
+ * PostgreSQL sessions at the process level. PostgreSQL may terminate other
+ * server processes after detecting a backend crash as part of its crash
+ * recovery and shared-memory safety mechanisms. Those sessions may therefore
+ * lose their connections, even though their Macavity state is not shared
+ * with the crashing session.
+ *
+ * It is also not transactional: an injected ERROR aborts the transaction
+ * but does not roll the counters back, which lets a caller confirm
+ * afterwards that the hit was recorded.
+ *
+ * Every event ever created stays in the registry, whatever its state, until
+ * macavity_reset() or the end of the backend.  The registry is the history;
+ * there is no separate log.
+ */
+typedef struct MacavityEvent
+{
+	int32		event_id;		/* backend-local, 1, 2, 3, ... */
+	MacavityEventState state;
+	MacavityPoint   point;
+	MacavityAction  action;
+	int32		occurrence;		/* which matching hit fires the event */
+	int32		hits;			/* matching hits counted since last armed */
 
 	/*
-	 * Bookkeeping that keeps the statement/transaction which armed the fault
-	 * from being counted as a matching event.  See macavity_state.c.
+	 * Bookkeeping that keeps the statement/transaction which armed the event
+	 * from being counted as a matching hit.  See macavity_state.c.
 	 */
-	int             skip_exec_end_depth;	/* -1 when unused */
+	int		skip_exec_end_depth;	/* -1 when unused */
 	bool		skip_xact_event;
-} MacavityFaultState;
+} MacavityEvent;
+
+/*
+ * Position of an in-progress scan over the armed events at one fault point,
+ * in firing order.  See macavity_event_next().
+ */
+typedef struct MacavityEventScan
+{
+	MacavityPoint   point;
+	int		rank;			/* index into the action precedence order */
+	int		pos;			/* position within that action's bucket */
+} MacavityEventScan;
 
 /* Executor nesting depth, maintained by the hook layer (macavity.c). */
 extern int	macavity_exec_nesting;
 
-/* --- fault state management (macavity_state.c) --------------------------- */
+/* --- event registry (macavity_state.c) ----------------------------------- */
 
 extern const MacavityNameInfo macavity_point_info[MACAVITY_NUM_POINTS];
 extern const MacavityNameInfo macavity_action_info[MACAVITY_NUM_ACTIONS];
 
-extern const MacavityFaultState *macavity_state(void);
 extern MacavityPoint macavity_point_lookup(const char *name);
 extern MacavityAction macavity_action_lookup(const char *name);
 extern const char *macavity_point_name(MacavityPoint point);
 extern const char *macavity_action_name(MacavityAction action);
+extern const char *macavity_event_state_name(MacavityEventState state);
 
-extern void macavity_fault_arm(MacavityPoint point, MacavityAction action,
-							   int32 occurrence);
-extern void macavity_fault_disarm(void);
-extern void macavity_set_xact_skip(void);
+/* Registry access: events are stored densely in event_id order. */
+extern int32 macavity_event_count(void);
+extern const MacavityEvent *macavity_event_get(int32 event_id);
+
+/* Registry changes.  Callers must have validated their arguments. */
+extern int32 macavity_event_create(MacavityPoint point, MacavityAction action, int32 occurrence);
+extern bool macavity_event_rearm(int32 event_id);
+extern bool macavity_event_disarm(int32 event_id);
+extern bool macavity_event_disarm_all(void);
+extern int32 macavity_registry_reset(void);
+extern void macavity_event_set_xact_skip(int32 event_id);
 
 /*
- * Record one matching event at 'point' and decide whether it fires.
+ * Walk the armed events at 'point' in firing order -- action precedence
+ * delay > crash > error, then ascending event_id -- recording one hit on
+ * each.
  *
- * The hit is counted first, unconditionally.  Only then is the occurrence
- * threshold tested; if it is reached, the fault is marked spent (armed
- * false, fired true, counters kept) and true is returned with the
- * configured action stored in *action.  The caller runs the action
- * afterwards, so the recorded hit survives an action that never returns.
+ * For every armed event reached, the hit is counted first, unconditionally.
+ * Only then is its occurrence threshold tested; if it is reached, the event
+ * becomes completed (counters kept) and true is returned with its action
+ * stored in *action.  The caller runs that action and calls again to
+ * continue the walk, so the recorded hit survives an action that never
+ * returns, and an action that never returns stops the walk there.
  */
-extern bool macavity_event(MacavityPoint point, MacavityAction *action);
+extern void macavity_event_scan_begin(MacavityPoint point, MacavityEventScan *scan);
+extern bool macavity_event_next(MacavityEventScan *scan, MacavityAction *action);
 
-/* Helpers used by the hook layer to ignore the arming statement/transaction. */
-extern bool macavity_consume_exec_end_skip(void);
-extern bool macavity_consume_xact_skip(void);
+/* Called at the end of every transaction. */
 extern void macavity_xact_cleanup(void);
 
 /* --- fault action execution (macavity_action.c) -------------------------- */
