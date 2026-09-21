@@ -14,15 +14,12 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-
 #include <signal.h>
 #include <unistd.h>
-
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/latch.h"
 #include "utils/timestamp.h"
-
 #include "macavity.h"
 
 /*
@@ -47,8 +44,7 @@ macavity_do_delay(bool interrupts_safe)
 		return;
 	}
 
-	endtime = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
-										  MACAVITY_DELAY_MS);
+	endtime = TimestampTzPlusMilliseconds(GetCurrentTimestamp(), MACAVITY_DELAY_MS);
 
 	for (;;)
 	{
@@ -75,14 +71,14 @@ macavity_do_delay(bool interrupts_safe)
  *
  * Terminate *this* backend immediately and uncleanly.
  *
- * The hit has already been counted by macavity_event(); this function is
- * reached only after the state machine has recorded it.
+ * The hit has already been counted by macavity_event_next(); this function
+ * is reached only after the registry has recorded it.
  *
  * SIGKILL is sent to MyProcPid and to nothing else: macavity never signals
  * the postmaster and never signals another backend.  The connection that
- * armed the fault dies with the backend and cannot restore itself -- the
- * client must reconnect, and the new session starts with no fault armed,
- * because this state lives only in the backend that is now gone.
+ * armed the event dies with the backend and cannot restore itself -- the
+ * client must reconnect, and the new session starts with an empty event
+ * registry, because the registry lives only in the backend that is now gone.
  *
  * PostgreSQL then applies its own crash containment: the postmaster
  * terminates the remaining backends ("terminating connection because of
@@ -101,7 +97,7 @@ macavity_do_crash(MacavityPoint point)
 	ereport(LOG,
 			(errmsg("macavity: crashing backend (PID %d) at fault point \"%s\"",
 					MyProcPid, macavity_point_name(point)),
-			 errdetail("The backend is being terminated with SIGKILL by an armed macavity fault."),
+			 errdetail("The backend is being terminated with SIGKILL by an armed macavity event."),
 			 errhint("The postmaster will treat this as a backend crash and reinitialize the cluster.")));
 
 	kill(MyProcPid, SIGKILL);
@@ -116,8 +112,8 @@ macavity_do_crash(MacavityPoint point)
 /*
  * macavity_execute_action
  *
- * Run one fault action.  The fault has already been disarmed by
- * macavity_event(), so nothing here needs to worry about re-entry.
+ * Run one fault action.  The event has already been marked completed by
+ * macavity_event_next(), so nothing here needs to worry about re-entry.
  */
 void
 macavity_execute_action(MacavityPoint point, MacavityAction action)

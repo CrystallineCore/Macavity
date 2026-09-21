@@ -20,12 +20,10 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
-
 #include "access/xact.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "utils/guc.h"
-
 #include "macavity.h"
 
 PG_MODULE_MAGIC;
@@ -47,21 +45,26 @@ int  macavity_exec_nesting = 0;
 /*
  * macavity_fire
  *
- * Record one event at 'point' and run the action if this is the configured
- * occurrence.
+ * Record one hit at 'point' on every armed event there, running the action
+ * of each event for which this is the configured occurrence.
  *
- * macavity_event() has already counted the hit and marked the fault spent
- * by the time it returns true, so the action below runs with the counters
- * final: an error thrown here, or a backend that never comes back from
- * here, still leaves the hit recorded, and the spent fault cannot re-enter
- * while the error is unwound.
+ * macavity_event_next() walks the events in firing order (delay > crash >
+ * error, then ascending event_id).  It has already counted the hit and
+ * marked the event completed by the time it returns true, so each action
+ * below runs with that event's counters final: an error thrown here, or a
+ * backend that never comes back from here, still leaves the hit recorded,
+ * and the completed event cannot re-enter while the error is unwound.  An
+ * action that does not return ends the walk; the remaining events are not
+ * reached for this hit.
  */
 static void
 macavity_fire(MacavityPoint point)
 {
+	MacavityEventScan scan;
 	MacavityAction action;
 
-	if (macavity_event(point, &action))
+	macavity_event_scan_begin(point, &scan);
+	while (macavity_event_next(&scan, &action))
 		macavity_execute_action(point, action);
 }
 
@@ -92,11 +95,9 @@ mac_ExecutorStart(QueryDesc *queryDesc, int eflags)
  */
 #if PG_VERSION_NUM >= 180000
 /* execute_once was removed from the executor API in PostgreSQL 18. */
-static void
-mac_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
+static void mac_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 #else
-static void
-mac_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
+static void mac_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
 				bool execute_once)
 #endif
 {
@@ -148,8 +149,8 @@ mac_ExecutorFinish(QueryDesc *queryDesc)
  *
  * The statement that called macavity_arm() reaches its own ExecutorEnd
  * after the arming function has returned; counting that would fire the
- * fault before the caller could run anything else, so exactly one event is
- * skipped for it.
+ * event before the caller could run anything else, so exactly one hit is
+ * skipped for each event armed by it (see event_skip_hit()).
  */
 static void
 mac_ExecutorEnd(QueryDesc *queryDesc)
@@ -159,8 +160,7 @@ mac_ExecutorEnd(QueryDesc *queryDesc)
 	else
 		standard_ExecutorEnd(queryDesc);
 
-	if (!macavity_consume_exec_end_skip())
-		macavity_fire(MACAVITY_POINT_EXECUTOR_END);
+	macavity_fire(MACAVITY_POINT_EXECUTOR_END);
 }
 
 /*
@@ -176,7 +176,7 @@ mac_ExecutorEnd(QueryDesc *queryDesc)
  * rejects that combination; see README.md.
  *
  * The PARALLEL_* and *PREPARE* events are deliberately ignored: they belong
- * to parallel workers and to two-phase commit, neither of which v0.1
+ * to parallel workers and to two-phase commit, neither of which macavity
  * claims to cover.
  */
 static void
@@ -185,13 +185,11 @@ mac_xact_callback(XactEvent event, void *arg)
 	switch (event)
 	{
 		case XACT_EVENT_PRE_COMMIT:
-			if (!macavity_consume_xact_skip())
-				macavity_fire(MACAVITY_POINT_BEFORE_COMMIT);
+			macavity_fire(MACAVITY_POINT_BEFORE_COMMIT);
 			break;
 
 		case XACT_EVENT_ABORT:
-			if (!macavity_consume_xact_skip())
-				macavity_fire(MACAVITY_POINT_BEFORE_ABORT);
+			macavity_fire(MACAVITY_POINT_BEFORE_ABORT);
 			macavity_xact_cleanup();
 			break;
 
