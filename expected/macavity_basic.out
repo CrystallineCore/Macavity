@@ -1,12 +1,12 @@
 --
--- macavity: API surface -- points, status, arm/disarm bookkeeping.
+-- macavity: API surface -- points, status, arm/disarm/reset bookkeeping.
 --
--- No fault may fire in this file: every fault armed here uses an
--- occurrence far beyond the number of events the file produces.  The
--- default occurrence (1) and faults that really fire are covered by
--- macavity_faults.sql.
+-- No event may fire in this file: every event armed here uses an
+-- occurrence far beyond the number of hits the file produces.  The
+-- default occurrence (1) and events that really fire are covered by
+-- macavity_faults.sql and macavity_events.sql.
 --
-CREATE EXTENSION macavity;
+CREATE EXTENSION IF NOT EXISTS macavity;
 -- Every advertised point must be implemented; this list is the contract.
 SELECT point, description FROM macavity_points() ORDER BY point;
      point      |                         description                          
@@ -17,78 +17,139 @@ SELECT point, description FROM macavity_points() ORDER BY point;
  executor_start | before executor execution begins (ExecutorStart_hook)
 (4 rows)
 
--- Nothing armed yet: armed is false, everything else NULL.
+-- Nothing created yet: the registry is empty.
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
-(1 row)
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
 
--- Arming reports through status().  The occurrence is remembered verbatim.
+-- Arming creates an event and returns its ID.  The occurrence is remembered
+-- verbatim.
 SELECT macavity_arm('executor_start', 'error', 400);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
-SELECT armed, point, action, occurrence FROM macavity_status();
- armed |     point      | action | occurrence 
--------+----------------+--------+------------
- t     | executor_start | error  |        400
+SELECT event_id, point, action, occurrence, state FROM macavity_status();
+ event_id |     point      | action | occurrence | state 
+----------+----------------+--------+------------+-------
+        1 | executor_start | error  |        400 | armed
 (1 row)
 
--- Arming again is refused rather than silently replacing the armed fault.
-SELECT macavity_arm('executor_end', 'delay');
-ERROR:  macavity: a fault is already armed in this session
-DETAIL:  Fault point "executor_start" with action "error" is armed at occurrence 400 (2 matching events so far).
-HINT:  Call macavity_disarm() first.
-SELECT armed, point, action, occurrence FROM macavity_status();
- armed |     point      | action | occurrence 
--------+----------------+--------+------------
- t     | executor_start | error  |        400
+-- Arming again creates a second, independent event with the next ID.
+SELECT macavity_arm('executor_end', 'delay', 400);
+ macavity_arm 
+--------------
+            2
 (1 row)
 
--- Disarm returns us to the empty state ...
+SELECT event_id, point, action, occurrence, state FROM macavity_status();
+ event_id |     point      | action | occurrence | state 
+----------+----------------+--------+------------+-------
+        1 | executor_start | error  |        400 | armed
+        2 | executor_end   | delay  |        400 | armed
+(2 rows)
+
+-- The action-specific forms create events too, and continue the same ID
+-- sequence.
+SELECT macavity_arm_error('before_commit', 400);
+ macavity_arm_error 
+--------------------
+                  3
+(1 row)
+
+SELECT macavity_arm_delay('before_abort', 400);
+ macavity_arm_delay 
+--------------------
+                  4
+(1 row)
+
+SELECT macavity_arm_crash('executor_start', 400);
+ macavity_arm_crash 
+--------------------
+                  5
+(1 row)
+
+SELECT event_id, point, action, occurrence, state FROM macavity_status();
+ event_id |     point      | action | occurrence | state 
+----------+----------------+--------+------------+-------
+        1 | executor_start | error  |        400 | armed
+        2 | executor_end   | delay  |        400 | armed
+        3 | before_commit  | error  |        400 | armed
+        4 | before_abort   | delay  |        400 | armed
+        5 | executor_start | crash  |        400 | armed
+(5 rows)
+
+-- Disarming everything leaves the events in the registry, disarmed ...
 SELECT macavity_disarm();
  macavity_disarm 
 -----------------
- 
+ t
+(1 row)
+
+SELECT event_id, state FROM macavity_status();
+ event_id |  state   
+----------+----------
+        1 | disarmed
+        2 | disarmed
+        3 | disarmed
+        4 | disarmed
+        5 | disarmed
+(5 rows)
+
+-- ... and a second disarm has nothing left to change.
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ f
+(1 row)
+
+SELECT macavity_disarm(NULL);
+ macavity_disarm 
+-----------------
+ f
+(1 row)
+
+-- Reset forgets every event and restarts IDs at 1.
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              5
 (1 row)
 
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              0
 (1 row)
 
--- ... and is a no-op when nothing is armed.
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
+SELECT macavity_arm('executor_start', 'error', 400);
+ macavity_arm 
+--------------
+            1
 (1 row)
 
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
-(1 row)
-
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- Arming does not count the arming statement itself.  Arm executor_end at
 -- a high occurrence and watch the counter: right after arming hits is 0,
 -- because the arming statement's own ExecutorEnd was skipped.  Every
--- statement after it -- including each status query -- counts one event, so
+-- statement after it -- including each status query -- counts one hit, so
 -- the second status query reports 2.
 SELECT macavity_arm('executor_end', 'error', 500);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT hits, remaining FROM macavity_status();
@@ -109,15 +170,21 @@ SELECT hits, remaining FROM macavity_status();
     2 |       498
 (1 row)
 
-SELECT macavity_disarm();
+SELECT macavity_disarm(1);
  macavity_disarm 
 -----------------
- 
+ t
 (1 row)
 
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT event_id, state FROM macavity_status();
+ event_id |  state   
+----------+----------
+        1 | disarmed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 

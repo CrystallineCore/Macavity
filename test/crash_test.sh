@@ -17,12 +17,12 @@
 #	terminating connection because of crash of another server process
 #
 # That is PostgreSQL's own crash containment -- the postmaster protecting
-# shared memory after an unclean exit -- and NOT macavity fault state
-# reaching another session.  Those sessions never had a fault armed; they
+# shared memory after an unclean exit -- and NOT macavity event state
+# reaching another session.  Those sessions never had an event armed; they
 # are simply disconnected along with everything else.  The crashed
 # connection itself cannot restore itself either: the client must reconnect,
-# and the new session starts with nothing armed, which is what step 4 below
-# verifies.
+# and the new session starts with an empty event registry, which is what
+# step 4 below verifies.
 #
 # Usage:
 #	test/crash_test.sh [psql connection options]
@@ -37,9 +37,16 @@
 #	2. it dies at the *configured occurrence*, not before, and the hits
 #	   counter advances on the way there
 #	3. the cluster recovers and accepts connections again
-#	4. the reconnected session has armed = false and no stale fault
-#	   configuration -- the state died with the backend
+#	4. the reconnected session has an empty event registry -- the events
+#	   died with the backend
 #	5. a committed row written before the crash survives recovery
+#	6. precedence crash > error: with both due at the same hit, the backend
+#	   dies without the error ever being raised, even though the error
+#	   event has the lower ID
+#	7. precedence delay > crash: with both due at the same hit, the delay
+#	   runs before the crash, even though the crash event has the lower ID
+#
+# The cluster is crashed three times in all.
 #
 set -u
 
@@ -65,13 +72,31 @@ fail() {
 	exit 1
 }
 
+# Crash recovery takes a moment; retry rather than racing it.
+wait_for_recovery() {
+	i=0
+	while [ "$i" -lt 60 ]; do
+		if [ "$(psql_q 'SELECT 1')" = "1" ]; then
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	fail "cluster did not accept connections again within 60s"
+}
+
+# psql reports the lost connection in one of these ways, depending on version.
+lost_connection() {
+	echo "$1" | grep -qE 'server closed the connection|connection to server was lost|terminated abnormally'
+}
+
 echo "macavity crash test -- this WILL crash the target cluster"
 echo
 
 # --- sanity ------------------------------------------------------------
 version=$(psql_q "SELECT extversion FROM pg_extension WHERE extname = 'macavity'")
 case "$version" in
-	0.*) echo "1..5  macavity $version found" ;;
+	0.*) echo "1..7  macavity $version found" ;;
 	*) fail "macavity is not installed in the target database ($version)" ;;
 esac
 
@@ -83,18 +108,18 @@ psql_q "DROP TABLE IF EXISTS macavity_crash_survivors;
 
 # --- 1 & 2: crash at occurrence 3, not before --------------------------
 # One session: arm executor_start at occurrence 3, then run statements until
-# the fault fires.  The early ones must produce output and the counter must
+# the event fires.  The early ones must produce output and the counter must
 # advance as they do; the last one must kill the backend, so psql loses the
 # connection.
 #
 # The counter readings prove the hit is recorded before the action runs:
-# each status query is itself a matching event, so it reports the hit it has
-# just caused.  The crashing hit cannot be read back -- the state lived in
+# each status query is itself a matching hit, so it reports the hit it has
+# just caused.  The crashing hit cannot be read back -- the registry lived in
 # the backend that just died -- but it is counted by the same code path, in
 # the same order, before macavity_execute_action() is ever called.
 out=$(psql_script <<'SQL'
 SELECT macavity_arm('executor_start', 'crash', 3);
-SELECT 'hits=' || hits || ' remaining=' || remaining AS counter FROM macavity_status();
+SELECT 'hits=' || hits || ' remaining=' || remaining AS counter FROM macavity_status() WHERE event_id = 1;
 SELECT 'event-two' AS marker;
 SELECT 'event-three-should-not-print' AS marker;
 SQL
@@ -111,28 +136,21 @@ echo "ok 1  - backend terminated at the fault point"
 echo "ok 2  - earlier hits counted, and passed through untouched"
 
 # --- 3: the cluster comes back ----------------------------------------
-# Crash recovery takes a moment; retry rather than racing it.
-i=0
-while [ "$i" -lt 60 ]; do
-	if [ "$(psql_q 'SELECT 1')" = "1" ]; then
-		break
-	fi
-	i=$((i + 1))
-	sleep 1
-done
-[ "$i" -lt 60 ] || fail "cluster did not accept connections again within 60s"
+wait_for_recovery
 echo "ok 3  - cluster recovered and accepts connections"
 
 # --- 4: the reconnected session is clean ------------------------------
 # The crashed connection is gone for good; this is a brand-new session.  Its
-# fault state must be empty: macavity state lives only in the backend that
-# armed it, so there is nothing for a new backend to inherit.
-# Note: string concatenation renders the boolean as 'false', not psql's 'f'.
-state=$(psql_q "SELECT armed || ' ' || coalesce(point, 'none') || ' ' ||
-				coalesce(hits::text, 'none') FROM macavity_status()")
-[ "$state" = "false none none" ] ||
-	fail "reconnected session has stale fault state: $state"
-echo "ok 4  - reconnected session has armed = false and no stale configuration"
+# registry must be empty: macavity events live only in the backend that
+# created them, so there is nothing for a new backend to inherit.  Its first
+# event gets ID 1 again.
+state=$(psql_q "SELECT count(*) FROM macavity_status()")
+[ "$state" = "0" ] ||
+	fail "reconnected session has stale events: $state"
+first_id=$(psql_q "SELECT macavity_arm_error('executor_start', 9999)")
+[ "$first_id" = "1" ] ||
+	fail "reconnected session did not start IDs at 1: $first_id"
+echo "ok 4  - reconnected session has an empty registry, IDs start at 1"
 
 # --- 5: the committed row survived ------------------------------------
 note=$(psql_q "SELECT note FROM macavity_crash_survivors")
@@ -142,5 +160,41 @@ echo "ok 5  - data committed before the crash survived recovery"
 
 psql_q "DROP TABLE macavity_crash_survivors" >/dev/null
 
+# --- 6: crash > error ---------------------------------------------------
+# The error event is created first (ID 1), the crash event second (ID 2),
+# both due at the next executor_start hit.  Precedence puts crash first, so
+# the backend dies and the injected error is never raised.
+out=$(psql_script <<'SQL'
+SELECT 'ids=' || macavity_arm_error('executor_start') || ',' || macavity_arm_crash('executor_start');
+SELECT 'should-not-print' AS marker;
+SQL
+)
+echo "$out" | grep -q 'ids=1,2' || fail "unexpected event IDs: $out"
+if echo "$out" | grep -q 'injected error'; then
+	fail "the error event ran before the crash event: $out"
+fi
+lost_connection "$out" || fail "the backend survived its crash event: $out"
+echo "ok 6  - crash takes precedence over error, regardless of event_id"
+wait_for_recovery
+
+# --- 7: delay > crash ---------------------------------------------------
+# The crash event is created first (ID 1), the delay event second (ID 2),
+# both due at the next executor_start hit.  Precedence puts delay first, so
+# the backend sleeps for the 1 s delay and only then dies.  Without the
+# delay the whole script takes a small fraction of a second.
+start=$(date +%s%N)
+out=$(psql_script <<'SQL'
+SELECT 'ids=' || macavity_arm_crash('executor_start') || ',' || macavity_arm_delay('executor_start');
+SELECT 'should-not-print' AS marker;
+SQL
+)
+elapsed_ms=$(( ($(date +%s%N) - start) / 1000000 ))
+echo "$out" | grep -q 'ids=1,2' || fail "unexpected event IDs: $out"
+lost_connection "$out" || fail "the backend survived its crash event: $out"
+[ "$elapsed_ms" -ge 900 ] ||
+	fail "the backend crashed after ${elapsed_ms} ms: the delay did not run first"
+echo "ok 7  - delay runs before crash, regardless of event_id (${elapsed_ms} ms)"
+wait_for_recovery
+
 echo
-echo "# All 5 crash tests passed."
+echo "# All 7 crash tests passed."

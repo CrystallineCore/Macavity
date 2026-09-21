@@ -1,0 +1,553 @@
+--
+-- macavity: the event registry -- several events at once.
+--
+-- Every status query is itself a matching hit for executor_start (before
+-- it reads the registry) and executor_end (after it has), and its implicit
+-- commit is a hit for before_commit.  The expected counters below include
+-- those hits.
+--
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              0
+(1 row)
+
+--
+-- Creation: IDs are backend-local integers handed out 1, 2, 3, ... across
+-- every arming function, and each event starts armed with fresh counters.
+--
+SELECT macavity_arm('executor_start', 'delay', 1000) AS first,
+	   macavity_arm('executor_start', 'error', 1000) AS second,
+	   macavity_arm('before_commit', 'crash', 1000) AS third;
+ first | second | third 
+-------+--------+-------
+     1 |      2 |     3
+(1 row)
+
+SELECT macavity_arm_delay('executor_end', 1000) AS fourth;
+ fourth 
+--------
+      4
+(1 row)
+
+SELECT event_id, point, action, occurrence, state FROM macavity_status();
+ event_id |     point      | action | occurrence | state 
+----------+----------------+--------+------------+-------
+        1 | executor_start | delay  |       1000 | armed
+        2 | executor_start | error  |       1000 | armed
+        3 | before_commit  | crash  |       1000 | armed
+        4 | executor_end   | delay  |       1000 | armed
+(4 rows)
+
+-- IDs are never reused while the registry lives: disarming does not free one.
+SELECT macavity_disarm();
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+SELECT macavity_arm_error('executor_start', 1000) AS fifth;
+ fifth 
+-------
+     5
+(1 row)
+
+-- Reset forgets everything, and the next event is 1 again.  An event armed
+-- before the reset never fires afterwards.
+SELECT macavity_arm_error('executor_start', 2) AS sixth;
+ sixth 
+-------
+     6
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              6
+(1 row)
+
+SELECT 1 AS would_have_been_hit_two;
+ would_have_been_hit_two 
+-------------------------
+                       1
+(1 row)
+
+SELECT * FROM macavity_status();
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
+
+SELECT macavity_arm_error('executor_start', 1000) AS first_again;
+ first_again 
+-------------
+           1
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+--
+-- Several events at the same point keep independent counters.  Both are
+-- 'error', so when both are due at the same hit the lower ID goes first --
+-- and, since an error does not return, the other one is not reached at all
+-- for that hit.
+--
+SELECT macavity_arm_error('executor_start', 3) AS a,
+	   macavity_arm_error('executor_start', 5) AS b;
+ a | b 
+---+---
+ 1 | 2
+(1 row)
+
+SELECT 1 AS hit_one;
+ hit_one 
+---------
+       1
+(1 row)
+
+SELECT event_id, hits, remaining, state FROM macavity_status();	-- hit two
+ event_id | hits | remaining | state 
+----------+------+-----------+-------
+        1 |    2 |         1 | armed
+        2 |    2 |         3 | armed
+(2 rows)
+
+SELECT 3 AS hit_three_fails;			-- event 1 fires; event 2 not reached
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT event_id, hits, remaining, state FROM macavity_status();	-- event 2: hit three
+ event_id | hits | remaining |   state   
+----------+------+-----------+-----------
+        1 |    3 |         0 | completed
+        2 |    3 |         2 | armed
+(2 rows)
+
+SELECT 4 AS hit_four;
+ hit_four 
+----------
+        4
+(1 row)
+
+SELECT 5 AS hit_five_fails;				-- event 2 fires
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT * FROM macavity_status();
+ event_id |     point      | action | occurrence | hits | remaining |   state   
+----------+----------------+--------+------------+------+-----------+-----------
+        1 | executor_start | error  |          3 |    3 |         0 | completed
+        2 | executor_start | error  |          5 |    5 |         0 | completed
+(2 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              2
+(1 row)
+
+--
+-- Events at different points count only their own point's hits.
+--
+BEGIN;
+SELECT macavity_arm_error('executor_start', 100) AS on_start,
+	   macavity_arm_error('executor_end', 100) AS on_end,
+	   macavity_arm_error('before_commit', 2) AS on_commit;
+ on_start | on_end | on_commit 
+----------+--------+-----------
+        1 |      2 |         3
+(1 row)
+
+SELECT 1 AS statement_one;
+ statement_one 
+---------------
+             1
+(1 row)
+
+SELECT event_id, point, hits, state FROM macavity_status();
+ event_id |     point      | hits | state 
+----------+----------------+------+-------
+        1 | executor_start |    2 | armed
+        2 | executor_end   |    1 | armed
+        3 | before_commit  |    0 | armed
+(3 rows)
+
+COMMIT;									-- before_commit hit 1
+BEGIN;
+SELECT event_id, point, hits, state FROM macavity_status();
+ event_id |     point      | hits | state 
+----------+----------------+------+-------
+        1 | executor_start |    3 | armed
+        2 | executor_end   |    2 | armed
+        3 | before_commit  |    1 | armed
+(3 rows)
+
+ROLLBACK;								-- not a commit
+BEGIN;
+COMMIT;									-- before_commit hit 2: fires
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT event_id, point, hits, state FROM macavity_status();
+ event_id |     point      | hits |   state   
+----------+----------------+------+-----------
+        1 | executor_start |    4 | armed
+        2 | executor_end   |    3 | armed
+        3 | before_commit  |    2 | completed
+(3 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              3
+(1 row)
+
+--
+-- Lifecycle: every event has its own state, and completed and disarmed
+-- events stay in the registry.
+--
+SELECT macavity_arm_error('executor_start', 1) AS will_complete;
+ will_complete 
+---------------
+             1
+(1 row)
+
+SELECT 1 AS completes_event_1;
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT macavity_arm_delay('executor_end', 100) AS will_be_disarmed,
+	   macavity_arm_error('before_commit', 100) AS stays_armed,
+	   macavity_arm_error('executor_start', 100) AS also_stays_armed;
+ will_be_disarmed | stays_armed | also_stays_armed 
+------------------+-------------+------------------
+                2 |           3 |                4
+(1 row)
+
+SELECT macavity_disarm(2);
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+-- one completed, one disarmed, two armed
+SELECT * FROM macavity_status();
+ event_id |     point      | action | occurrence | hits | remaining |   state   
+----------+----------------+--------+------------+------+-----------+-----------
+        1 | executor_start | error  |          1 |    1 |         0 | completed
+        2 | executor_end   | delay  |        100 |    0 |       100 | disarmed
+        3 | before_commit  | error  |        100 |    1 |        99 | armed
+        4 | executor_start | error  |        100 |    2 |        98 | armed
+(4 rows)
+
+-- Disarm changes only armed events: completed, already-disarmed and
+-- unknown IDs all report false and change nothing.
+SELECT macavity_disarm(1) AS completed,
+	   macavity_disarm(2) AS already_disarmed,
+	   macavity_disarm(99) AS unknown;
+ completed | already_disarmed | unknown 
+-----------+------------------+---------
+ f         | f                | f
+(1 row)
+
+SELECT macavity_disarm(3) AS armed;
+ armed 
+-------
+ t
+(1 row)
+
+SELECT event_id, state FROM macavity_status();
+ event_id |   state   
+----------+-----------
+        1 | completed
+        2 | disarmed
+        3 | disarmed
+        4 | armed
+(4 rows)
+
+-- Disarm-all changes the remaining armed event, then has nothing left.
+SELECT macavity_disarm() AS changed_something;
+ changed_something 
+-------------------
+ t
+(1 row)
+
+SELECT macavity_disarm() AS changed_something;
+ changed_something 
+-------------------
+ f
+(1 row)
+
+SELECT event_id, state, hits, remaining FROM macavity_status();
+ event_id |   state   | hits | remaining 
+----------+-----------+------+-----------
+        1 | completed |    1 |         0
+        2 | disarmed  |    0 |       100
+        3 | disarmed  |    3 |        97
+        4 | disarmed  |    6 |        94
+(4 rows)
+
+-- Reinstating a disarmed event: same ID and configuration, counters reset.
+SELECT macavity_arm(4) AS reinstated;
+ reinstated 
+------------
+ t
+(1 row)
+
+SELECT event_id, point, action, occurrence, hits, remaining, state
+  FROM macavity_status() WHERE event_id = 4;
+ event_id |     point      | action | occurrence | hits | remaining | state 
+----------+----------------+--------+------------+------+-----------+-------
+        4 | executor_start | error  |        100 |    1 |        99 | armed
+(1 row)
+
+-- Reinstating an event that is already armed changes nothing, not even the
+-- counters it has built up: they go on from 3 to 5, counting the
+-- reinstating statement and the status query, instead of restarting.
+SELECT 1 AS another_hit;
+ another_hit 
+-------------
+           1
+(1 row)
+
+SELECT hits FROM macavity_status() WHERE event_id = 4;				-- 3
+ hits 
+------
+    3
+(1 row)
+
+SELECT macavity_arm(4) AS reinstated;								-- hit 4
+ reinstated 
+------------
+ f
+(1 row)
+
+SELECT event_id, hits, remaining, state FROM macavity_status() WHERE event_id = 4;	-- 5
+ event_id | hits | remaining | state 
+----------+------+-----------+-------
+        4 |    5 |        95 | armed
+(1 row)
+
+SELECT macavity_disarm(4);
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+-- Reinstating a completed event makes it eligible to fire again.
+SELECT macavity_arm(1) AS reinstated;
+ reinstated 
+------------
+ t
+(1 row)
+
+SELECT 1 AS event_1_fires_again;
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT event_id, hits, remaining, state FROM macavity_status() WHERE event_id = 1;
+ event_id | hits | remaining |   state   
+----------+------+-----------+-----------
+        1 |    1 |         0 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              4
+(1 row)
+
+--
+-- Precedence: delay > crash > error, whatever the IDs.  The error event is
+-- created first, so it has the lower ID, yet the delay runs before it.  Had
+-- the error gone first, it would have aborted the statement before the
+-- delay was reached, leaving the delay armed with one hit.
+--
+SELECT macavity_arm_error('executor_start', 2) AS error_event,
+	   macavity_arm_delay('executor_start', 2) AS delay_event;
+ error_event | delay_event 
+-------------+-------------
+           1 |           2
+(1 row)
+
+SELECT clock_timestamp() AS t0 \gset
+SELECT 1 AS delayed_then_fails;			-- hit 2: delay, then error
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT clock_timestamp() - :'t0'::timestamptz >= interval '0.9 second'
+	AS delay_ran_first;
+ delay_ran_first 
+-----------------
+ t
+(1 row)
+
+SELECT event_id, action, hits, state FROM macavity_status();
+ event_id | action | hits |   state   
+----------+--------+------+-----------
+        1 | error  |    2 | completed
+        2 | delay  |    2 | completed
+(2 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              2
+(1 row)
+
+--
+-- Equal actions go in ascending event_id order -- ID order, not the order
+-- in which the events were (re)armed.  Event 1 is disarmed and reinstated
+-- after event 2 exists, and still fires first.
+--
+BEGIN;
+SELECT macavity_arm_error('before_commit') AS e1;
+ e1 
+----
+  1
+(1 row)
+
+SELECT macavity_disarm(1);
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+SELECT macavity_arm_error('before_commit') AS e2;
+ e2 
+----
+  2
+(1 row)
+
+SELECT macavity_arm(1);
+ macavity_arm 
+--------------
+ t
+(1 row)
+
+COMMIT;									-- event 1 fires; event 2 not reached
+ERROR:  macavity: injected error at fault point "before_commit"
+BEGIN;
+SELECT event_id, hits, remaining, state FROM macavity_status();
+ event_id | hits | remaining |   state   
+----------+------+-----------+-----------
+        1 |    1 |         0 | completed
+        2 |    0 |         1 | armed
+(2 rows)
+
+ROLLBACK;
+BEGIN;
+COMMIT;									-- now event 2
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT event_id, hits, remaining, state FROM macavity_status();
+ event_id | hits | remaining |   state   
+----------+------+-----------+-----------
+        1 |    1 |         0 | completed
+        2 |    1 |         0 | completed
+(2 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              2
+(1 row)
+
+--
+-- Several delay events due at the same hit all run: a delay returns, so
+-- evaluation carries on to the next event.
+--
+SELECT macavity_arm_delay('executor_start') AS d1,
+	   macavity_arm_delay('executor_start') AS d2;
+ d1 | d2 
+----+----
+  1 |  2
+(1 row)
+
+SELECT clock_timestamp() - statement_timestamp() >= interval '1.8 seconds'
+	AS both_delays_ran;
+ both_delays_ran 
+-----------------
+ t
+(1 row)
+
+SELECT event_id, hits, state FROM macavity_status();
+ event_id | hits |   state   
+----------+------+-----------
+        1 |    1 | completed
+        2 |    1 | completed
+(2 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              2
+(1 row)
+
+--
+-- Several error events at one point: only the first due error is reached
+-- per hit (above); events that are not due yet are still counted if they
+-- come before it in firing order.
+--
+SELECT macavity_arm_error('executor_start', 2) AS due_second,
+	   macavity_arm_error('executor_start', 1) AS due_first,
+	   macavity_arm_error('executor_start', 3) AS due_third;
+ due_second | due_first | due_third 
+------------+-----------+-----------
+          1 |         2 |         3
+(1 row)
+
+SELECT 1 AS fails_via_event_2;			-- event 1 counted, event 2 fires
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT 2 AS fails_via_event_1;			-- event 1 fires, event 3 not reached
+ERROR:  macavity: injected error at fault point "executor_start"
+SELECT event_id, occurrence, hits, remaining, state FROM macavity_status();
+ event_id | occurrence | hits | remaining |   state   
+----------+------------+------+-----------+-----------
+        1 |          2 |    2 |         0 | completed
+        2 |          1 |    1 |         0 | completed
+        3 |          3 |    1 |         2 | armed
+(3 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              3
+(1 row)
+
+--
+-- Different actions and points together.  At COMMIT the before_commit delay
+-- runs first, then the before_commit error aborts the transaction, and the
+-- abort reaches the before_abort delay: two delays in one COMMIT.  The
+-- executor_start event just keeps counting.
+--
+BEGIN;
+SELECT macavity_arm_error('before_commit') AS commit_error,
+	   macavity_arm_delay('before_commit') AS commit_delay,
+	   macavity_arm_delay('before_abort') AS abort_delay,
+	   macavity_arm_error('executor_start', 100) AS bystander;
+ commit_error | commit_delay | abort_delay | bystander 
+--------------+--------------+-------------+-----------
+            1 |            2 |           3 |         4
+(1 row)
+
+SELECT clock_timestamp() AS t0 \gset
+COMMIT;
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT clock_timestamp() - :'t0'::timestamptz >= interval '1.8 seconds'
+	AS both_delays_ran;
+ both_delays_ran 
+-----------------
+ t
+(1 row)
+
+SELECT * FROM macavity_status();
+ event_id |     point      | action | occurrence | hits | remaining |   state   
+----------+----------------+--------+------------+------+-----------+-----------
+        1 | before_commit  | error  |          1 |    1 |         0 | completed
+        2 | before_commit  | delay  |          1 |    1 |         0 | completed
+        3 | before_abort   | delay  |          1 |    1 |         0 | completed
+        4 | executor_start | error  |        100 |    3 |        97 | armed
+(4 rows)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              4
+(1 row)
+
+SELECT * FROM macavity_status();
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
+

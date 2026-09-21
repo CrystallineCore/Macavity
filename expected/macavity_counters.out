@@ -2,14 +2,14 @@
 -- macavity: hits/remaining semantics.
 --
 -- The invariant under test: a matching fault-point hit is recorded BEFORE
--- the configured action runs, so the hit that fired the fault is still
+-- the configured action runs, so the hit that fired the event is still
 -- visible through macavity_status() afterwards.
 --
--- before_commit is the point used for counting, because its matching events
+-- before_commit is the point used for counting, because its matching hits
 -- are transaction ends and this file controls those explicitly.  While a
--- before_commit fault is armed, every status query is therefore wrapped in
+-- before_commit event is armed, every status query is therefore wrapped in
 -- BEGIN ... ROLLBACK: an abort is not a commit, so reading the counters
--- does not disturb them.  Once a fault has fired, nothing is armed and
+-- does not disturb them.  Once the event has fired, nothing is armed and
 -- plain autocommit statements are safe again.
 --
 -- occurrence = 1: the first matching hit fires.
@@ -17,29 +17,29 @@ BEGIN;
 SELECT macavity_arm('before_commit', 'error', 1);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
-SELECT armed, occurrence, hits, remaining FROM macavity_status();	-- 0 / 1
- armed | occurrence | hits | remaining 
+SELECT state, occurrence, hits, remaining FROM macavity_status();	-- 0 / 1
+ state | occurrence | hits | remaining 
 -------+------------+------+-----------
- t     |          1 |    0 |         1
+ armed |          1 |    0 |         1
 (1 row)
 
 COMMIT;																-- hit 1: fires
 ERROR:  macavity: injected error at fault point "before_commit"
 -- the hit was counted before the error was raised: hits 1, remaining 0.
--- armed is false now, but the spent fault is still described.
-SELECT armed, point, action, occurrence, hits, remaining FROM macavity_status();
- armed |     point     | action | occurrence | hits | remaining 
--------+---------------+--------+------------+------+-----------
- f     | before_commit | error  |          1 |    1 |         0
+-- the event is completed now, and still described in full.
+SELECT * FROM macavity_status();
+ event_id |     point     | action | occurrence | hits | remaining |   state   
+----------+---------------+--------+------------+------+-----------+-----------
+        1 | before_commit | error  |          1 |    1 |         0 | completed
 (1 row)
 
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- occurrence = 2: the first hit only counts; the second fires.
@@ -47,15 +47,15 @@ BEGIN;
 SELECT macavity_arm('before_commit', 'error', 2);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 COMMIT;																-- hit 1
 BEGIN;
-SELECT armed, hits, remaining FROM macavity_status();				-- 1 / 1
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- 1 / 1
+ state | hits | remaining 
 -------+------+-----------
- t     |    1 |         1
+ armed |    1 |         1
 (1 row)
 
 ROLLBACK;
@@ -68,33 +68,78 @@ SELECT 1 AS second_transaction;
 
 COMMIT;																-- hit 2: fires
 ERROR:  macavity: injected error at fault point "before_commit"
-SELECT armed, point, occurrence, hits, remaining FROM macavity_status();
- armed |     point     | occurrence | hits | remaining 
--------+---------------+------------+------+-----------
- f     | before_commit |          2 |    2 |         0
+SELECT event_id, point, occurrence, hits, remaining, state FROM macavity_status();
+ event_id |     point     | occurrence | hits | remaining |   state   
+----------+---------------+------------+------+-----------+-----------
+        1 | before_commit |          2 |    2 |         0 | completed
 (1 row)
 
--- Arming again replaces the spent fault's counters with a fresh 0.
+-- Reinstating the completed event by ID starts its counters again from 0,
+-- with the same ID and configuration.  Watch them after every hit of a
+-- second run to completion.
+BEGIN;
+SELECT macavity_arm(1);
+ macavity_arm 
+--------------
+ t
+(1 row)
+
+SELECT event_id, state, hits, remaining FROM macavity_status();		-- 0 / 2
+ event_id | state | hits | remaining 
+----------+-------+------+-----------
+        1 | armed |    0 |         2
+(1 row)
+
+COMMIT;																-- hit 1
+BEGIN;
+SELECT state, hits, remaining FROM macavity_status();				-- 1 / 1
+ state | hits | remaining 
+-------+------+-----------
+ armed |    1 |         1
+(1 row)
+
+ROLLBACK;
+BEGIN;
+SELECT 1 AS second_run;
+ second_run 
+------------
+          1
+(1 row)
+
+COMMIT;																-- hit 2: fires
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT event_id, occurrence, hits, remaining, state FROM macavity_status();
+ event_id | occurrence | hits | remaining |   state   
+----------+------------+------+-----------+-----------
+        1 |          2 |    2 |         0 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
 -- occurrence = 3: check hits and remaining after every matching hit.
 BEGIN;
 SELECT macavity_arm('before_commit', 'error', 3);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
-SELECT armed, hits, remaining FROM macavity_status();				-- 0 / 3
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- 0 / 3
+ state | hits | remaining 
 -------+------+-----------
- t     |    0 |         3
+ armed |    0 |         3
 (1 row)
 
 COMMIT;																-- hit 1
 BEGIN;
-SELECT armed, hits, remaining FROM macavity_status();				-- 1 / 2
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- 1 / 2
+ state | hits | remaining 
 -------+------+-----------
- t     |    1 |         2
+ armed |    1 |         2
 (1 row)
 
 ROLLBACK;
@@ -107,10 +152,10 @@ SELECT 1 AS transaction_two;
 
 COMMIT;																-- hit 2
 BEGIN;
-SELECT armed, hits, remaining FROM macavity_status();				-- 2 / 1
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- 2 / 1
+ state | hits | remaining 
 -------+------+-----------
- t     |    2 |         1
+ armed |    2 |         1
 (1 row)
 
 ROLLBACK;
@@ -123,33 +168,32 @@ SELECT 1 AS transaction_three;
 
 COMMIT;																-- hit 3: fires
 ERROR:  macavity: injected error at fault point "before_commit"
-SELECT armed, point, action, occurrence, hits, remaining FROM macavity_status();
- armed |     point     | action | occurrence | hits | remaining 
--------+---------------+--------+------------+------+-----------
- f     | before_commit | error  |          3 |    3 |         0
+SELECT * FROM macavity_status();
+ event_id |     point     | action | occurrence | hits | remaining |   state   
+----------+---------------+--------+------------+------+-----------+-----------
+        1 | before_commit | error  |          3 |    3 |         0 | completed
 (1 row)
 
--- An explicit disarm returns the session to the clear state: armed false
--- and every other column NULL, with no trace of the spent fault.
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
+-- A reset returns the session to an empty registry, with no trace of the
+-- completed event.
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
-(1 row)
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
 
--- Events at other points, and aborts, are not matching events and do not
+-- Events at other points, and aborts, are not matching hits and do not
 -- move the counters.
 BEGIN;
 SELECT macavity_arm('before_commit', 'error', 2);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT 1 AS statement_one;
@@ -164,34 +208,84 @@ SELECT 1 AS statement_two;
              1
 (1 row)
 
-SELECT armed, hits, remaining FROM macavity_status();				-- still 0 / 2
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- still 0 / 2
+ state | hits | remaining 
 -------+------+-----------
- t     |    0 |         2
+ armed |    0 |         2
 (1 row)
 
 ROLLBACK;															-- an abort, not a hit
 BEGIN;
-SELECT armed, hits, remaining FROM macavity_status();				-- still 0 / 2
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();				-- still 0 / 2
+ state | hits | remaining 
 -------+------+-----------
- t     |    0 |         2
+ armed |    0 |         2
 (1 row)
 
-SELECT macavity_disarm();
+SELECT macavity_disarm(1);
  macavity_disarm 
 -----------------
- 
+ t
 (1 row)
 
 ROLLBACK;
+-- A disarmed event keeps the counters it had reached ...
+BEGIN;
+SELECT macavity_arm(1);
+ macavity_arm 
+--------------
+ t
+(1 row)
+
+COMMIT;																-- hit 1
+BEGIN;
+SELECT macavity_disarm(1);
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT event_id, state, hits, remaining FROM macavity_status();		-- 1 / 1
+ event_id |  state   | hits | remaining 
+----------+----------+------+-----------
+        1 | disarmed |    1 |         1
+(1 row)
+
+-- ... until it is reinstated, which resets them.
+BEGIN;
+SELECT macavity_arm(1);
+ macavity_arm 
+--------------
+ t
+(1 row)
+
+SELECT event_id, state, hits, remaining FROM macavity_status();		-- 0 / 2
+ event_id | state | hits | remaining 
+----------+-------+------+-----------
+        1 | armed |    0 |         2
+(1 row)
+
+SELECT macavity_disarm(1);
+ macavity_disarm 
+-----------------
+ t
+(1 row)
+
+ROLLBACK;
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
 -- The counters are not transactional: a hit recorded inside a transaction
 -- that later rolls back stays recorded.  That is what makes the counters
 -- trustworthy after an injected error, which always aborts its transaction.
 SELECT macavity_arm('executor_start', 'error', 5);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 BEGIN;
@@ -203,21 +297,20 @@ SELECT 1 AS hit_inside_doomed_transaction;
 
 ROLLBACK;
 -- 2 hits: the rolled-back statement, plus this status query itself
-SELECT armed, hits, remaining FROM macavity_status();
- armed | hits | remaining 
+SELECT state, hits, remaining FROM macavity_status();
+ state | hits | remaining 
 -------+------+-----------
- t     |    2 |         3
+ armed |    2 |         3
 (1 row)
 
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
-(1 row)
+ event_id | point | action | occurrence | hits | remaining | state 
+----------+-------+--------+------------+------+-----------+-------
+(0 rows)
 

@@ -5,22 +5,22 @@
 -- under pg_regress -- an unclean backend exit makes the postmaster reset
 -- the cluster -- so it has its own harness in test/crash_test.sh.
 --
--- error at executor_start, next matching event
+-- error at executor_start, next matching hit
 SELECT macavity_arm('executor_start', 'error');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT 1 AS never_runs;
 ERROR:  macavity: injected error at fault point "executor_start"
--- the fault is one-shot: it is spent, so armed is false.  The hit that
--- fired it was recorded before the error was raised, so the counters are
--- still reported: hits 1, remaining 0.
+-- the event is one-shot: it is completed, and no longer fires.  The hit
+-- that fired it was recorded before the error was raised, so the counters
+-- are still reported: hits 1, remaining 0.
 SELECT * FROM macavity_status();
- armed |     point      | action | occurrence | hits | remaining 
--------+----------------+--------+------------+------+-----------
- f     | executor_start | error  |          1 |    1 |         0
+ event_id |     point      | action | occurrence | hits | remaining |   state   
+----------+----------------+--------+------------+------+-----------+-----------
+        1 | executor_start | error  |          1 |    1 |         0 | completed
 (1 row)
 
 SELECT 1 AS runs_normally;
@@ -29,23 +29,23 @@ SELECT 1 AS runs_normally;
              1
 (1 row)
 
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
--- occurrence counting: events 1 and 2 pass through, event 3 fails
+-- occurrence counting: hits 1 and 2 pass through, hit 3 fails
 SELECT macavity_arm('executor_start', 'error', 3);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
-SELECT 1 AS event_one;
- event_one 
------------
-         1
+SELECT 1 AS hit_one;
+ hit_one 
+---------
+       1
 (1 row)
 
 SELECT hits, remaining FROM macavity_status();
@@ -54,12 +54,18 @@ SELECT hits, remaining FROM macavity_status();
     2 |         1
 (1 row)
 
-SELECT 3 AS event_three_fails;
+SELECT 3 AS hit_three_fails;
 ERROR:  macavity: injected error at fault point "executor_start"
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT state FROM macavity_status();
+   state   
+-----------
+ completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- error at executor_end with occurrence 1: the next statement's own
@@ -67,47 +73,41 @@ SELECT armed FROM macavity_status();
 SELECT macavity_arm('executor_end', 'error');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT 1 AS statement_whose_end_fails;
 ERROR:  macavity: injected error at fault point "executor_end"
--- the hit was recorded before the error: fired, hits 1, remaining 0
-SELECT armed, point, action, occurrence, hits, remaining FROM macavity_status();
- armed |    point     | action | occurrence | hits | remaining 
--------+--------------+--------+------------+------+-----------
- f     | executor_end | error  |          1 |    1 |         0
+-- the hit was recorded before the error: completed, hits 1, remaining 0
+SELECT event_id, point, action, occurrence, hits, remaining, state FROM macavity_status();
+ event_id |    point     | action | occurrence | hits | remaining |   state   
+----------+--------------+--------+------------+------+-----------+-----------
+        1 | executor_end | error  |          1 |    1 |         0 | completed
 (1 row)
 
-SELECT macavity_disarm();
- macavity_disarm 
------------------
- 
-(1 row)
-
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- before_commit inside an explicit transaction block: the user's own COMMIT
--- is the matching event, so the transaction is rolled back instead
+-- is the matching hit, so the transaction is rolled back instead
 BEGIN;
 SELECT macavity_arm('before_commit', 'error');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 CREATE TEMP TABLE macavity_commit_victim (i int);
 INSERT INTO macavity_commit_victim VALUES (1);
 COMMIT;
 ERROR:  macavity: injected error at fault point "before_commit"
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT state FROM macavity_status();
+   state   
+-----------
+ completed
 (1 row)
 
 -- the table did not survive the failed commit
@@ -117,20 +117,62 @@ SELECT count(*) FROM pg_class WHERE relname = 'macavity_commit_victim';
      0
 (1 row)
 
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
 -- before_commit in autocommit mode: the arming statement's own implicit
--- commit is not counted, so the fault survives to trip the next statement
+-- commit is not counted, so the event survives to trip the next statement
 SELECT macavity_arm('before_commit', 'error');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT 1 AS commits_and_then_fails;
 ERROR:  macavity: injected error at fault point "before_commit"
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT state FROM macavity_status();
+   state   
+-----------
+ completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- the same skip applies when a completed event is reinstated in autocommit
+-- mode: the reinstating statement's own commit is not counted
+SELECT macavity_arm_error('before_commit');
+ macavity_arm_error 
+--------------------
+                  1
+(1 row)
+
+SELECT 1 AS fails_at_commit;
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT macavity_arm(1);
+ macavity_arm 
+--------------
+ t
+(1 row)
+
+SELECT 1 AS fails_again_at_commit;
+ERROR:  macavity: injected error at fault point "before_commit"
+SELECT event_id, hits, state FROM macavity_status();
+ event_id | hits |   state   
+----------+------+-----------
+        1 |    1 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- before_abort during abort processing: the delay runs, then the original
@@ -138,16 +180,22 @@ SELECT armed FROM macavity_status();
 SELECT macavity_arm('before_abort', 'delay');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 DO $$ BEGIN RAISE EXCEPTION 'macavity test: forcing an abort'; END $$;
 ERROR:  macavity test: forcing an abort
 CONTEXT:  PL/pgSQL function inline_code_block line 1 at RAISE
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT state FROM macavity_status();
+   state   
+-----------
+ completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
 -- delay really delays: the statement observes at least most of the 1 s
@@ -155,7 +203,7 @@ SELECT armed FROM macavity_status();
 SELECT macavity_arm('executor_start', 'delay');
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
 SELECT clock_timestamp() - statement_timestamp() >= interval '0.5 second'
@@ -165,23 +213,29 @@ SELECT clock_timestamp() - statement_timestamp() >= interval '0.5 second'
  t
 (1 row)
 
-SELECT armed FROM macavity_status();
- armed 
--------
- f
+SELECT state FROM macavity_status();
+   state   
+-----------
+ completed
 (1 row)
 
--- a disarmed fault never fires, however many events go by
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- a disarmed event never fires, however many hits go by
 SELECT macavity_arm('executor_start', 'error', 2);
  macavity_arm 
 --------------
- 
+            1
 (1 row)
 
-SELECT macavity_disarm();
+SELECT macavity_disarm(1);
  macavity_disarm 
 -----------------
- 
+ t
 (1 row)
 
 SELECT 1 AS safe_one;
@@ -203,8 +257,14 @@ SELECT 3 AS safe_three;
 (1 row)
 
 SELECT * FROM macavity_status();
- armed | point | action | occurrence | hits | remaining 
--------+-------+--------+------------+------+-----------
- f     |       |        |            |      |          
+ event_id |     point      | action | occurrence | hits | remaining |  state   
+----------+----------------+--------+------------+------+-----------+----------
+        1 | executor_start | error  |          2 |    1 |         1 | disarmed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
 (1 row)
 
