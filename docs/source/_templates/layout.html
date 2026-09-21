@@ -1,0 +1,78 @@
+{% extends "!layout.html" %}
+
+{% block extrahead %}
+    {{ super() }}
+
+    <!-- Google Search Console: add your own verification tag here, e.g.
+    <meta name="google-site-verification" content="..." /> -->
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="{{ seo_description }}">
+    <meta name="keywords" content="{{ seo_keywords }}">
+    <meta name="author" content="Sivaprasad Murali">
+    <meta name="robots" content="index, follow">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="macavity – Deterministic Fault Injection for PostgreSQL">
+    <meta property="og:description" content="Documentation, installation guide and SQL reference for macavity, a PostgreSQL extension that injects errors, delays and backend crashes on exactly the Nth hit.">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="macavity Documentation">
+    <meta property="og:url" content="{{ pageurl or 'https://macavity.readthedocs.io/' }}">
+    <meta property="og:image" content="{{ seo_image }}">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="macavity – Deterministic Fault Injection for PostgreSQL">
+    <meta name="twitter:description" content="Arm an error, a delay or a crash at executor start, executor end, commit or abort, and have it fire on exactly the Nth hit.">
+    <meta name="twitter:image" content="{{ seo_image }}">
+
+    <!-- JSON-LD Structured Data for Software Application -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "macavity",
+    "description": "A PostgreSQL extension for deterministic, session-local fault injection: errors, delays and backend crashes at executor start, executor end, commit and abort.",
+    "url": "https://macavity.readthedocs.io/",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Linux",
+    "softwareVersion": "{{ release }}",
+    "author": {
+        "@type": "Person",
+        "name": "Sivaprasad Murali"
+    },
+    "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+    },
+    "programmingLanguage": "C",
+    "keywords": "postgresql, extension, fault injection, testing, crash recovery, error injection, deterministic testing",
+    "softwareHelp": "https://macavity.readthedocs.io/",
+    "downloadUrl": "https://pgxn.org/dist/macavity/",
+    "codeRepository": "https://github.com/crystallinecore/macavity",
+    "license": "https://opensource.org/licenses/MIT",
+    "inLanguage": "en"
+    }
+    </script>
+
+    <!-- Breadcrumb Structured Data -->
+    <script type="application/ld+json">
+    {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [{
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "https://macavity.readthedocs.io/"
+    },{
+        "@type": "ListItem",
+        "position": 2,
+        "name": {{ title|striptags|tojson }},
+        "item": "{{ pageurl }}"
+    }]
+    }
+    </script>
+
+{% endblock %}
