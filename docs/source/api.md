@@ -27,7 +27,7 @@ Calling any of these is itself a `SELECT`, and so an `executor_start` and
 
 ### CREATE EXTENSION
 
-Creates the macavity functions in the current database.
+Creates the Macavity functions in the current database.
 
 **Syntax**:
 ```postgresql
@@ -346,14 +346,14 @@ Grant explicitly. See [Installation: Grant Access](installation.md#grant-access)
 
 ## Error Reference
 
-Every message macavity raises. All start with `macavity:`.
+Every message Macavity raises. All start with `macavity:`.
 
 ### Injected by an event
 
 | Message | SQLSTATE | Cause |
 | --- | --- | --- |
 | `macavity: injected error at fault point "<point>"` | `P0001` | An `error` event fired. This is the fault you asked for. |
-| `canceling statement due to statement timeout` | `57014` | Not macavity's own message: a `delay` outlasted `statement_timeout`. The event is still `completed`. |
+| `canceling statement due to statement timeout` | `57014` | Not Macavity's own message: a `delay` outlasted `statement_timeout`. The event is still `completed`. |
 
 ### Raised by the arming functions
 

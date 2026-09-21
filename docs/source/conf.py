@@ -88,7 +88,7 @@ html_static_path = ["_static"]
 html_extra_path = ["robots.txt"]
 
 html_title = (
-    f"macavity {release} Documentation - Deterministic Fault Injection for PostgreSQL"
+    f"Macavity {release} Documentation - Deterministic Fault Injection for PostgreSQL"
 )
 
 html_short_title = "macavity Docs"
@@ -127,7 +127,7 @@ html_baseurl = "https://macavity.readthedocs.io/en/latest/"
 # _templates/layout.html; keep the two in sync.
 
 SEO_DESCRIPTION = (
-    "macavity is a PostgreSQL extension for deterministic, session-local "
+    "Macavity is a PostgreSQL extension for deterministic, session-local "
     "fault injection: arm an error, a delay or a backend crash at executor "
     "start, executor end, commit or abort, and have it fire on exactly the "
     "Nth hit. For development and test clusters."

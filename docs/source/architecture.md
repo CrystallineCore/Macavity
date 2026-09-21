@@ -1,8 +1,8 @@
-# macavity Architecture
+# Architecture
 
 ## Overview
 
-macavity is a small PostgreSQL extension, about 1,500 lines of heavily
+Macavity is a small PostgreSQL extension, about 1,500 lines of heavily
 commented C, that injects faults at four points in PostgreSQL's execution.
 It patches nothing in PostgreSQL core. Every point is built on a documented
 extension hook or callback, and all state lives in plain backend memory.
@@ -34,7 +34,7 @@ hit that caused it.
 
 ### 4. **Honest Surface**
 
-macavity claims only what it implements. `macavity_points()` reads straight
+Macavity claims only what it implements. `macavity_points()` reads straight
 from the implemented-points table, and combinations that cannot work, such
 as `error` at `before_abort` or `crash` on Windows, are refused up front
 rather than failing later.
@@ -129,7 +129,7 @@ goes through PostgreSQL's executor in this session:
 | Statement | Executor hit? |
 | --- | --- |
 | `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `VALUES` | yes, one of each |
-| macavity's own functions (`SELECT macavity_status()` …) | yes: they are ordinary `SELECT`s |
+| Macavity's own functions (`SELECT macavity_status()` …) | yes: they are ordinary `SELECT`s |
 | `EXPLAIN` without `ANALYZE` | yes: the executor is started and ended to build the plan output |
 | Queries inside functions: `PERFORM`, `SELECT … INTO`, SQL-function and trigger bodies | yes, each one, in addition to the outer statement |
 | PL/pgSQL fast-path expressions such as `a := 1 + 1` | no |
@@ -207,7 +207,7 @@ fired.
 
 ### Hooks
 
-`_PG_init()` chains onto the previous value of every hook, so macavity
+`_PG_init()` chains onto the previous value of every hook, so Macavity
 co-exists with other extensions that use them:
 
 ```text
