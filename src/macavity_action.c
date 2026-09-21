@@ -8,7 +8,7 @@
  * macavity_action_info[]; no other layer needs to change.
  *
  * WARNING: the "crash" action deliberately terminates the current backend
- * with SIGKILL.  This is destructive by design.  Read README.md before
+ * with SIGKILL.  It is POSIX-only; macavity_arm() refuses it on Windows.  This is destructive by design.  Read README.md before
  * loading this extension anywhere you care about.
  *
  *-------------------------------------------------------------------------
@@ -100,7 +100,17 @@ macavity_do_crash(MacavityPoint point)
 			 errdetail("The backend is being terminated with SIGKILL by an armed macavity event."),
 			 errhint("The postmaster will treat this as a backend crash and reinitialize the cluster.")));
 
+#ifndef WIN32
 	kill(MyProcPid, SIGKILL);
+#else
+
+	/*
+	 * Unreachable: macavity_arm() refuses "crash" on Windows, where
+	 * PostgreSQL's kill() emulation cannot deliver SIGKILL.  Defend the
+	 * invariant rather than falling through to the PANIC below.
+	 */
+	elog(ERROR, "macavity: the crash action is not supported on Windows");
+#endif
 
 	/*
 	 * Not reached.  If SIGKILL were somehow blocked or ignored we must not

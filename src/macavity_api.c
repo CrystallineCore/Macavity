@@ -122,6 +122,21 @@ macavity_create_event(MacavityPoint point, MacavityAction action,
 				 errdetail("PostgreSQL has no pre-abort hook; the abort is already in progress when this point is reached, so raising an error there would escalate to FATAL."),
 				 errhint("Use action \"crash\" or \"delay\" at \"before_abort\", or arm \"error\" at \"before_commit\".")));
 
+#ifdef WIN32
+
+	/*
+	 * "crash" works by sending POSIX SIGKILL to the backend itself.  On
+	 * Windows, PostgreSQL's kill() emulation delivers signals through a pipe
+	 * and cannot terminate a process with SIGKILL, so refuse the action
+	 * instead of arming an event that could never do what it says.
+	 */
+	if (action == MACAVITY_ACTION_CRASH)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("macavity: action \"crash\" is not supported on Windows"),
+				 errdetail("The crash action terminates the backend with POSIX SIGKILL, which Windows does not provide.")));
+#endif
+
 	event_id = macavity_event_create(point, action, occurrence);
 	macavity_after_arm(event_id);
 
