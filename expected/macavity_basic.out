@@ -9,9 +9,9 @@
 CREATE EXTENSION IF NOT EXISTS macavity;
 -- Every advertised point must be implemented; this list is the contract.
 SELECT point, description FROM macavity_points() ORDER BY point;
-     point      |                         description                          
-----------------+--------------------------------------------------------------
- before_abort   | during transaction abort processing (XACT_EVENT_ABORT)
+     point      |                                    description                                     
+----------------+------------------------------------------------------------------------------------
+ before_abort   | during top-level transaction abort, not subtransaction rollback (XACT_EVENT_ABORT)
  before_commit  | before transaction commit processing (XACT_EVENT_PRE_COMMIT)
  executor_end   | after executor execution completes (ExecutorEnd_hook)
  executor_start | before executor execution begins (ExecutorStart_hook)

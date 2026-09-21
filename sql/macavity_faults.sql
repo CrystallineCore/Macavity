@@ -83,3 +83,81 @@ SELECT 2 AS safe_two;
 SELECT 3 AS safe_three;
 SELECT * FROM macavity_status();
 SELECT macavity_reset();
+
+-- The arming statement fails after arming executor_end.  Its ExecutorEnd
+-- never runs, so the skip reserved for it must not survive and swallow a
+-- later hit: with occurrence 2 the event fires at stmt_b, not stmt_c.
+-- (random() * 0 keeps the division from being folded at plan time, which
+-- would fail the statement before macavity_arm() ran at all.)
+SELECT macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+SELECT 'stmt_a' AS stmt;
+SELECT 'stmt_b' AS stmt;
+SELECT 'stmt_c' AS stmt;
+SELECT event_id, hits, state FROM macavity_status();
+SELECT macavity_reset();
+
+-- same, inside an explicit transaction block that is then rolled back
+BEGIN;
+SELECT macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+ROLLBACK;
+SELECT 'stmt_a' AS stmt;
+SELECT 'stmt_b' AS stmt;
+SELECT 'stmt_c' AS stmt;
+SELECT macavity_reset();
+
+-- same, inside a PL/pgSQL exception block: no transaction abort happens,
+-- only a subtransaction rollback, and the skip must still be dropped
+DO $$
+BEGIN
+	BEGIN
+		PERFORM macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	PERFORM 'a';
+	RAISE NOTICE 'after stmt_a';
+	PERFORM 'b';
+	RAISE NOTICE 'after stmt_b: not reached';
+END $$;
+SELECT event_id, hits, state FROM macavity_status();
+SELECT macavity_reset();
+
+-- but an error inside the arming statement that does not kill it keeps the
+-- skip: the outer SELECT armed the event, caught an error in a nested
+-- block, and finished normally, so its own ExecutorEnd is still skipped and
+-- the next statement is the matching hit
+CREATE FUNCTION macavity_test_arm_then_catch() RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+	id integer;
+BEGIN
+	BEGIN
+		id := macavity_arm('executor_end', 'error');
+		PERFORM 1 / (random() * 0)::int;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	RETURN id;
+END $$;
+SELECT macavity_test_arm_then_catch();
+SELECT 1 AS statement_whose_end_fails;
+SELECT event_id, hits, state FROM macavity_status();
+DROP FUNCTION macavity_test_arm_then_catch();
+SELECT macavity_reset();
+
+-- before_abort fires only when a whole transaction aborts.  Rolling back a
+-- subtransaction -- ROLLBACK TO SAVEPOINT, or a PL/pgSQL exception block
+-- catching an error -- is not a matching hit; the top-level ROLLBACK is.
+BEGIN;
+SELECT macavity_arm('before_abort', 'delay');
+SAVEPOINT sp;
+SELECT 1 / (random() * 0)::int;
+ROLLBACK TO SAVEPOINT sp;
+SELECT hits, state FROM macavity_status();
+DO $$
+BEGIN
+	PERFORM 1 / (random() * 0)::int;
+EXCEPTION WHEN division_by_zero THEN NULL;
+END $$;
+SELECT hits, state FROM macavity_status();
+ROLLBACK;
+SELECT hits, state FROM macavity_status();
+SELECT macavity_reset();

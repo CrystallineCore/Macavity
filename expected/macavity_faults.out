@@ -268,3 +268,171 @@ SELECT macavity_reset();
               1
 (1 row)
 
+-- The arming statement fails after arming executor_end.  Its ExecutorEnd
+-- never runs, so the skip reserved for it must not survive and swallow a
+-- later hit: with occurrence 2 the event fires at stmt_b, not stmt_c.
+-- (random() * 0 keeps the division from being folded at plan time, which
+-- would fail the statement before macavity_arm() ran at all.)
+SELECT macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+ERROR:  division by zero
+SELECT 'stmt_a' AS stmt;
+  stmt  
+--------
+ stmt_a
+(1 row)
+
+SELECT 'stmt_b' AS stmt;
+ERROR:  macavity: injected error at fault point "executor_end"
+SELECT 'stmt_c' AS stmt;
+  stmt  
+--------
+ stmt_c
+(1 row)
+
+SELECT event_id, hits, state FROM macavity_status();
+ event_id | hits |   state   
+----------+------+-----------
+        1 |    2 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- same, inside an explicit transaction block that is then rolled back
+BEGIN;
+SELECT macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+ERROR:  division by zero
+ROLLBACK;
+SELECT 'stmt_a' AS stmt;
+  stmt  
+--------
+ stmt_a
+(1 row)
+
+SELECT 'stmt_b' AS stmt;
+ERROR:  macavity: injected error at fault point "executor_end"
+SELECT 'stmt_c' AS stmt;
+  stmt  
+--------
+ stmt_c
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- same, inside a PL/pgSQL exception block: no transaction abort happens,
+-- only a subtransaction rollback, and the skip must still be dropped
+DO $$
+BEGIN
+	BEGIN
+		PERFORM macavity_arm('executor_end', 'error', 2), 1 / (random() * 0)::int;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	PERFORM 'a';
+	RAISE NOTICE 'after stmt_a';
+	PERFORM 'b';
+	RAISE NOTICE 'after stmt_b: not reached';
+END $$;
+NOTICE:  after stmt_a
+ERROR:  macavity: injected error at fault point "executor_end"
+CONTEXT:  SQL statement "SELECT 'b'"
+PL/pgSQL function inline_code_block line 9 at PERFORM
+SELECT event_id, hits, state FROM macavity_status();
+ event_id | hits |   state   
+----------+------+-----------
+        1 |    2 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- but an error inside the arming statement that does not kill it keeps the
+-- skip: the outer SELECT armed the event, caught an error in a nested
+-- block, and finished normally, so its own ExecutorEnd is still skipped and
+-- the next statement is the matching hit
+CREATE FUNCTION macavity_test_arm_then_catch() RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+	id integer;
+BEGIN
+	BEGIN
+		id := macavity_arm('executor_end', 'error');
+		PERFORM 1 / (random() * 0)::int;
+	EXCEPTION WHEN division_by_zero THEN NULL;
+	END;
+	RETURN id;
+END $$;
+SELECT macavity_test_arm_then_catch();
+ macavity_test_arm_then_catch 
+------------------------------
+                            1
+(1 row)
+
+SELECT 1 AS statement_whose_end_fails;
+ERROR:  macavity: injected error at fault point "executor_end"
+SELECT event_id, hits, state FROM macavity_status();
+ event_id | hits |   state   
+----------+------+-----------
+        1 |    1 | completed
+(1 row)
+
+DROP FUNCTION macavity_test_arm_then_catch();
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
+-- before_abort fires only when a whole transaction aborts.  Rolling back a
+-- subtransaction -- ROLLBACK TO SAVEPOINT, or a PL/pgSQL exception block
+-- catching an error -- is not a matching hit; the top-level ROLLBACK is.
+BEGIN;
+SELECT macavity_arm('before_abort', 'delay');
+ macavity_arm 
+--------------
+            1
+(1 row)
+
+SAVEPOINT sp;
+SELECT 1 / (random() * 0)::int;
+ERROR:  division by zero
+ROLLBACK TO SAVEPOINT sp;
+SELECT hits, state FROM macavity_status();
+ hits | state 
+------+-------
+    0 | armed
+(1 row)
+
+DO $$
+BEGIN
+	PERFORM 1 / (random() * 0)::int;
+EXCEPTION WHEN division_by_zero THEN NULL;
+END $$;
+SELECT hits, state FROM macavity_status();
+ hits | state 
+------+-------
+    0 | armed
+(1 row)
+
+ROLLBACK;
+SELECT hits, state FROM macavity_status();
+ hits |   state   
+------+-----------
+    1 | completed
+(1 row)
+
+SELECT macavity_reset();
+ macavity_reset 
+----------------
+              1
+(1 row)
+
