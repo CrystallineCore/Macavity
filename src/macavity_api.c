@@ -11,9 +11,12 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "funcapi.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 #include "macavity.h"
 
