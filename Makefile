@@ -8,7 +8,7 @@ OBJS = \
 	src/macavity_api.o
 
 EXTENSION = macavity
-DATA = sql/macavity--0.2.0.sql sql/macavity--0.1.0--0.2.0.sql
+DATA = sql/macavity--0.2.0.sql sql/macavity--0.1.0--0.2.0.sql sql/macavity--0.2.0--0.2.1.sql
 PGFILEDESC = "macavity - deterministic fault injection for testing"
 
 # Regression tests.  sql/ holds both the extension install scripts (installed

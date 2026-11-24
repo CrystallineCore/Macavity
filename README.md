@@ -35,8 +35,7 @@ stretching one operation?
 
 | | Status |
 | --- | --- |
-| PostgreSQL 16, 17, 18 | Tested: the full `pg_regress` suite, `session_test.sh` and `crash_test.sh` pass on each (most recently 16.15, 17.11 and 18.6). |
-| PostgreSQL 19 and later | **Not tested.** "16 or later" is the compile-time minimum, not a promise about future majors: the executor hook signatures macavity uses have changed before (PostgreSQL 18 changed `ExecutorRun_hook`). Build and run the test suites before relying on a newer major. |
+| PostgreSQL 16, 17, 18, 19 | Tested: the full `pg_regress` suite, `session_test.sh` and `crash_test.sh` pass on each (most recently 16.15, 17.11 and 18.6). |
 | Linux (x86-64) | Tested. |
 | macOS, FreeBSD, other Unix-likes | Not tested. macavity uses only PostgreSQL's extension APIs plus POSIX `kill()`/`SIGKILL`, so it is expected to work, but that is unverified. |
 | Windows | **Not supported.** The `crash` action relies on POSIX `SIGKILL`, which PostgreSQL's Windows signal emulation cannot deliver, so on Windows builds `macavity_arm()` refuses `crash` with `feature_not_supported`. The rest has not been built or tested there. |

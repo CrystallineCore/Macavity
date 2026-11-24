@@ -2,6 +2,14 @@
 
 All notable changes to Macavity are documented in this file.
 
+## 0.2.1
+
+This release aims to provide PG19 compatibility. No performance changes are expected.
+
+* No SQL changes: `sql/macavity--0.2.0--0.2.1.sql` is a no-op upgrade script.
+* To upgrade from 0.2.0, install the new build and run `ALTER EXTENSION macavity UPDATE;` in each database that has the extension. Existing sessions keep the old library loaded until they reconnect.
+* Upgrading directly from 0.1.0 also works (`0.1.0 → 0.2.0 → 0.2.1`); see [Upgrading from 0.1.0](#upgrading-from-010) for the caller changes.
+
 ## 0.2.0
 
 This release replaces the single armed fault with a **per-session event registry**. A session can now arm multiple fault events at once. Each event has a stable ID, independent counters, a lifecycle state, and can be re-armed after firing.
@@ -67,4 +75,3 @@ Initial release.
 * Three actions: `error`, `delay` (fixed at 1 second) and `crash` (the backend sends `SIGKILL` to itself).
 * `macavity_arm()`, `macavity_disarm()`, `macavity_status()` and `macavity_points()`. The `hits` and `remaining` counters are updated before the action runs.
 * The `pg_regress` suites `macavity_basic`, `macavity_errors`, `macavity_counters` and `macavity_faults`, plus `test/session_test.sh` and `test/crash_test.sh`.
-
