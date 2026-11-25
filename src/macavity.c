@@ -28,7 +28,7 @@
 
 PG_MODULE_MAGIC;
 
-void		_PG_init(void);
+void	_PG_init(void);
 
 /* Saved previous hook values, so we chain instead of clobbering. */
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;

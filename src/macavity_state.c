@@ -65,9 +65,9 @@ static const MacavityAction action_precedence[MACAVITY_NUM_ACTIONS] = {
  */
 typedef struct MacavityBucket
 {
-	int32	   *ids;
-	int32	    count;
-	int32	    capacity;
+	int32	*ids;
+	int32	count;
+	int32	capacity;
 } MacavityBucket;
 
 static MemoryContext registry_cxt = NULL;
@@ -171,7 +171,7 @@ event_lookup(int32 event_id)
 static void *
 registry_grow(void *array, int32 *capacity, int32 needed, Size elemsize)
 {
-	int32		newcap;
+	int32	newcap;
 
 	if (needed <= *capacity)
 		return array;

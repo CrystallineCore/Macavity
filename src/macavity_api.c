@@ -276,9 +276,9 @@ macavity_disarm(PG_FUNCTION_ARGS)
  *	armed		hits counts the matching hits seen so far and remaining is
  *		        occurrence - hits.
  *	completed	the event fired; its final counters are kept, so a caller can
- *			confirm after the fact that the hit was recorded before the
- *			action ran (remaining is 0).
- *	disarmed	        cancelled before it fired; the counters show how far it got.
+ *				confirm after the fact that the hit was recorded before the
+ *				action ran (remaining is 0).
+ *	disarmed	cancelled before it fired; the counters show how far it got.
  *
  * An empty registry (a brand-new session, or one just reset) returns no
  * rows.

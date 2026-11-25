@@ -1,7 +1,3 @@
-# macavity extension
-#
-# WARNING: destructive fault-injection tooling.  Development and test
-# clusters only -- see README.md.
 comment = 'deterministic fault injection for testing (DESTRUCTIVE; test clusters only)'
 default_version = '0.2.1'
 module_pathname = '$libdir/macavity'

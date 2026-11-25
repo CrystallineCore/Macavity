@@ -8,8 +8,9 @@
  * macavity_action_info[]; no other layer needs to change.
  *
  * WARNING: the "crash" action deliberately terminates the current backend
- * with SIGKILL.  It is POSIX-only; macavity_arm() refuses it on Windows.  This is destructive by design.  Read README.md before
- * loading this extension anywhere you care about.
+ * with SIGKILL.  It is POSIX-only; macavity_arm() refuses it on Windows.  
+ * This is destructive by design.  Read README.md before loading this 
+ * extension anywhere you care about.
  *
  *-------------------------------------------------------------------------
  */
